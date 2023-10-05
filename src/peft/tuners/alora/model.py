@@ -160,7 +160,7 @@ class AloraModel(BaseTuner):
             kwargs["gptq_quantization_config"] = quantization_config
 
         # TODO: better deal with that
-        if isinstance(target, LoraLayer):
+        if isinstance(target, AloraLayer):
             target.update_layer(
                 adapter_name,
                 r,
@@ -211,7 +211,7 @@ class AloraModel(BaseTuner):
                         p.requires_grad = True
             elif bias == "lora_only":
                 for m in self.model.modules():
-                    if isinstance(m, LoraLayer) and hasattr(m, "bias") and m.bias is not None:
+                    if isinstance(m, AloraLayer) and hasattr(m, "bias") and m.bias is not None:
                         m.bias.requires_grad = True
             else:
                 raise NotImplementedError(f"Requested bias: {bias}, is not implemented.")
@@ -306,7 +306,7 @@ class AloraModel(BaseTuner):
 
     def set_adapter(self, adapter_name):
         for module in self.model.modules():
-            if isinstance(module, LoraLayer):
+            if isinstance(module, AloraLayer):
                 if module.merged:
                     warnings.warn("Adapter cannot be set when the model is merged. Unmerging the model first.")
                     module.unmerge()
@@ -332,7 +332,7 @@ class AloraModel(BaseTuner):
                 parent, target, target_name = _get_submodules(self.model, key)
             except AttributeError:
                 continue
-            if isinstance(target, LoraLayer):
+            if isinstance(target, AloraLayer):
                 if is_bnb_available() and isinstance(target, bnb.nn.Linear8bitLt):
                     bias = target.bias is not None
                     new_module = bnb.nn.Linear8bitLt(
@@ -466,10 +466,10 @@ class AloraModel(BaseTuner):
         key_list = [key for key, _ in self.model.named_modules() if "lora" not in key]
         for key in key_list:
             _, target, _ = _get_submodules(self.model, key)
-            if isinstance(target, LoraLayer):
+            if isinstance(target, AloraLayer):
                 if adapter_name in target.lora_A:
-                    target_lora_A = target.lora_A[adapter_name].weight
-                    target_lora_B = target.lora_B[adapter_name].weight
+                    target_lora_A = target.lora_A[adapter_name]
+                    target_lora_B = target.lora_B[adapter_name]
                 else:
                     continue
 
@@ -478,8 +478,8 @@ class AloraModel(BaseTuner):
                 if combination_type == "linear":
                     for adapter, weight in zip(adapters, weights):
                         if adapter in target.lora_A:
-                            current_adapter_lora_A = target.lora_A[adapter].weight
-                            current_adapter_lora_B = target.lora_B[adapter].weight
+                            current_adapter_lora_A = target.lora_A[adapter]
+                            current_adapter_lora_B = target.lora_B[adapter]
                         else:
                             continue
                         target_lora_A.data += current_adapter_lora_A.data * weight * target.scaling[adapter]
@@ -488,8 +488,8 @@ class AloraModel(BaseTuner):
                     loras_A, loras_B = [], []
                     for adapter, weight in zip(adapters, weights):
                         if adapter in target.lora_A:
-                            current_adapter_lora_A = target.lora_A[adapter].weight
-                            current_adapter_lora_B = target.lora_B[adapter].weight
+                            current_adapter_lora_A = target.lora_A[adapter]
+                            current_adapter_lora_B = target.lora_B[adapter]
                         else:
                             continue
                         loras_A.append(current_adapter_lora_A.data * weight * target.scaling[adapter])
@@ -571,7 +571,7 @@ class AloraModel(BaseTuner):
         key_list = [key for key, _ in self.model.named_modules() if "lora" not in key]
         for key in key_list:
             _, target, _ = _get_submodules(self.model, key)
-            if isinstance(target, LoraLayer):
+            if isinstance(target, AloraLayer):
                 for attr in [
                     "r",
                     "lora_alpha",

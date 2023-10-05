@@ -34,8 +34,8 @@ class AloraLayer(BaseTunerLayer):
         self.lora_alpha = {}
         self.scaling = {}
         self.lora_dropout = nn.ModuleDict({})
-        self.lora_A = nn.ModuleDict({})
-        self.lora_B = nn.ModuleDict({})
+        self.lora_A = nn.ParameterDict({})
+        self.lora_B = nn.ParameterDict({})
         # Mark the weight as unmerged
         self.merged = False
         self._disable_adapters = False
@@ -69,8 +69,8 @@ class AloraLayer(BaseTunerLayer):
         self.lora_dropout.update(nn.ModuleDict({adapter_name: lora_dropout_layer}))
         # Actual trainable parameters
         if r > 0:
-            self.lora_A[adapter_name] = nn.Linear(self.in_features, r, bias=False)
-            self.lora_B[adapter_name] = nn.Linear(r, self.out_features, bias=False)
+            self.lora_A[adapter_name] = nn.Parameter(torch.empty((self.in_features, r)))
+            self.lora_B[adapter_name] = nn.Parameter(torch.empty((r, self.out_features)))
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name)
@@ -88,8 +88,8 @@ class AloraLayer(BaseTunerLayer):
     def reset_lora_parameters(self, adapter_name):
         if adapter_name in self.lora_A.keys():
             # initialize A the same way as the default for nn.Linear and B to zero
-            nn.init.kaiming_uniform_(self.lora_A[adapter_name].weight, a=math.sqrt(5))
-            nn.init.zeros_(self.lora_B[adapter_name].weight)
+            nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B[adapter_name])
 
     def scale_layer(self, scale_factor: float) -> None:
         if scale_factor != 1:
@@ -126,6 +126,7 @@ class Linear(nn.Linear, AloraLayer):
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
+        experts: int = 1,
         **kwargs,
     ) -> None:
         init_lora_weights = kwargs.pop("init_lora_weights", True)
@@ -168,7 +169,7 @@ class Linear(nn.Linear, AloraLayer):
     def get_delta_weight(self, adapter) -> torch.Tensor:
         return (
             transpose(
-                self.lora_B[adapter].weight @ self.lora_A[adapter].weight,
+                self.lora_B[adapter] @ self.lora_A[adapter],
                 self.fan_in_fan_out,
             )
             * self.scaling[adapter]
@@ -176,30 +177,6 @@ class Linear(nn.Linear, AloraLayer):
 
     def _linear(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
-
-    # def forward(self, x: torch.Tensor) -> torch.Tensor:
-    #     previous_dtype = x.dtype
-
-    #     if self.disable_adapters:
-    #         if self.merged:
-    #             self.unmerge()
-    #         result = self._linear(x)
-    #     elif self.merged:
-    #         result = self._linear(x)
-    #     else:
-    #         result = self._linear(x)
-    #         for active_adapter in self.active_adapters:
-    #             if active_adapter not in self.lora_A.keys():
-    #                 continue
-    #             lora_A = self.lora_A[active_adapter]
-    #             lora_B = self.lora_B[active_adapter]
-    #             dropout = self.lora_dropout[active_adapter]
-    #             scaling = self.scaling[active_adapter]
-    #             x = x.to(lora_A.weight.dtype)
-    #             result += lora_B(lora_A(dropout(x))) * scaling
-
-    #     result = result.to(previous_dtype)
-    #     return result
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         previous_dtype = x.dtype
@@ -221,11 +198,11 @@ class Linear(nn.Linear, AloraLayer):
                 scaling = self.scaling[active_adapter]
 
                 # Using einsum for lora_A matrix multiplication
-                x_transformed = torch.einsum('bi,ij->bj', x, lora_A.weight)
+                x_transformed = torch.einsum('bi,ij->bj', x, lora_A)
                 x_transformed = dropout(x_transformed)
 
                 # Using einsum for lora_B matrix multiplication
-                result += torch.einsum('bj,jk->bk', x_transformed, lora_B.weight) * scaling
+                result += torch.einsum('bj,jk->bk', x_transformed, lora_B) * scaling
 
         result = result.to(previous_dtype)
         return result
