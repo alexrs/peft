@@ -17,6 +17,7 @@ import warnings
 
 import bitsandbytes as bnb
 import torch
+import torch.nn.functional as F
 
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 from peft.utils.other import transpose
@@ -36,6 +37,7 @@ if is_bnb_available():
             r: int = 0,
             lora_alpha: int = 1,
             lora_dropout: float = 0.0,
+            num_experts: int = 1,
             **kwargs,
         ) -> None:
             bnb.nn.Linear8bitLt.__init__(
@@ -48,119 +50,59 @@ if is_bnb_available():
                 threshold=kwargs.get("threshold", 0.0),
                 index=kwargs.get("index", None),
             )
-            AloraLayer.__init__(self, in_features=in_features, out_features=out_features)
+            AloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
             init_lora_weights = kwargs.pop("init_lora_weights", True)
-            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights)
+            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
             self.set_adapter(adapter_name)
 
-        def merge(self):
-            if self.merged:
-                warnings.warn(
-                    f"Already following adapters were merged {','.join(self.merged_adapters)}. "
-                    f"You are now additionally merging {','.join(self.active_adapters)}."
-                )
-            for active_adapter in self.active_adapters:
-                if active_adapter not in self.lora_A.keys():
-                    continue
-                warnings.warn(
-                    "Merge lora module to 8-bit linear may get different generations due to rounding errors."
-                )
-                lora_data = self.get_delta_weight(active_adapter)
-
-                if self.state.SCB is None:
-                    self.state.SCB = self.weight.SCB
-                # Dequantize the result of identity matrix and int8 weight because bitsandbytes does not support int8
-                # dequantization directly
-                im = torch.eye(self.weight.data.shape[-1]).contiguous().half().to(self.weight.device)
-                im, imt, SCim, SCimt, coo_tensorim = bnb.functional.double_quant(im)
-                im, Sim = bnb.functional.transform(im, "col32")
-
-                if self.state.CxB is None:
-                    self.state.CxB, self.state.SB = bnb.functional.transform(
-                        self.weight.data, to_order=self.state.formatB
-                    )
-                out32, Sout32 = bnb.functional.igemmlt(im, self.state.CxB, Sim, self.state.SB)
-                output = bnb.functional.mm_dequant(out32, Sout32, SCim, self.state.SCB, bias=None).t()
-                w_data = output.to(lora_data.dtype).to(lora_data.device) + lora_data
-                self.weight = bnb.nn.Int8Params(
-                    w_data.to("cpu"), requires_grad=False, has_fp16_weights=self.weight.has_fp16_weights
-                ).to(self.weight.device)
-                self.state.reset_grads()
-                self.merged_adapters.append(active_adapter)
-                self.merged = True
-
-        def unmerge(self):
-            if not self.merged:
-                warnings.warn("Already unmerged. Nothing to do.")
-                return
-            while len(self.merged_adapters) > 0:
-                active_adapter = self.merged_adapters.pop()
-                if active_adapter not in self.lora_A.keys():
-                    continue
-                warnings.warn(
-                    "Unmerge lora module to 8-bit linear may get different generations due to rounding errors."
-                )
-                lora_data = self.get_delta_weight(active_adapter)
-
-                if self.state.SCB is None:
-                    self.state.SCB = self.weight.SCB
-                im = torch.eye(self.weight.data.shape[-1]).contiguous().half().to(self.weight.device)
-                im, imt, SCim, SCimt, coo_tensorim = bnb.functional.double_quant(im)
-                im, Sim = bnb.functional.transform(im, "col32")
-
-                if self.state.CxB is None:
-                    self.state.CxB, self.state.SB = bnb.functional.transform(
-                        self.weight.data, to_order=self.state.formatB
-                    )
-                out32, Sout32 = bnb.functional.igemmlt(im, self.state.CxB, Sim, self.state.SB)
-                output = bnb.functional.mm_dequant(out32, Sout32, SCim, self.state.SCB, bias=None).t()
-                w_data = output.to(lora_data.dtype).to(lora_data.device) - lora_data
-                self.weight = bnb.nn.Int8Params(
-                    w_data.to("cpu"), requires_grad=False, has_fp16_weights=self.weight.has_fp16_weights
-                ).to(self.weight.device)
-                self.state.reset_grads()
-                self.merged = False
 
         def get_delta_weight(self, adapter):
             return (
                 transpose(
-                    self.lora_B[adapter].weight @ self.lora_A[adapter].weight,
+                    self.lora_B[adapter] @ self.lora_A[adapter],
                     False,
                 )
                 * self.scaling[adapter]
             )
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            if self.disable_adapters:
-                if self.merged:
-                    self.unmerge()
-                result = super().forward(x)
-            elif self.merged:
-                result = super().forward(x)
-            else:
-                result = super().forward(x)
-                for active_adapter in self.active_adapters:
-                    if active_adapter not in self.lora_A.keys():
-                        continue
-                    lora_A = self.lora_A[active_adapter]
-                    lora_B = self.lora_B[active_adapter]
-                    dropout = self.lora_dropout[active_adapter]
-                    scaling = self.scaling[active_adapter]
+            result = super().forward(x)
 
-                    requires_conversion = not torch.is_autocast_enabled()
-                    if requires_conversion:
-                        expected_dtype = result.dtype
-                        compute_dtype = lora_A.weight.dtype
-                        if x.dtype != compute_dtype:
-                            x = x.to(compute_dtype)
-                    output = lora_B(lora_A(dropout(x)))
-                    if requires_conversion:
-                        output = output.to(expected_dtype)
-                    output = output * scaling
-                    result += output
+            # The molora model only supports one active adapter at a time
+            active_adapter = self.active_adapters[0]
+            if active_adapter in self.lora_A.keys():
+                lora_A = self.lora_A[active_adapter]
+                lora_B = self.lora_B[active_adapter]
+                lora_router = self.lora_router[active_adapter]
+                dropout = self.lora_dropout[active_adapter]
+                scaling = self.scaling[active_adapter]
+
+                requires_conversion = not torch.is_autocast_enabled()
+                if requires_conversion:
+                    expected_dtype = result.dtype
+                    compute_dtype = lora_A.dtype
+                    if x.dtype != compute_dtype:
+                        x = x.to(compute_dtype)
+
+                # Compute expert_weights using the routing layer
+                logits = lora_router(x)
+                expert_weights = F.softmax(logits, dim=-1)
+                # Expand expert_weights across sequence length
+                expert_weights = expert_weights.unsqueeze(1).expand(-1, x.shape[1], -1)
+
+                # Using einsum for lora_A matrix multiplication
+                x_transformed = torch.einsum('bsi,eij->bsej', x, lora_A)
+                x_transformed = dropout(x_transformed)
+
+                # Using einsum for lora_B matrix multiplication
+                output = torch.einsum('bsej,ejk,bse->bsk', x_transformed, lora_B, expert_weights)
+
+                if requires_conversion:
+                    output = output.to(expected_dtype)
+                result += output * scaling
 
             return result
 
@@ -177,6 +119,7 @@ if is_bnb_4bit_available():
             r: int = 0,
             lora_alpha: int = 1,
             lora_dropout: float = 0.0,
+            num_experts: int = 1,
             **kwargs,
         ) -> None:
             bnb.nn.Linear4bit.__init__(
@@ -188,93 +131,64 @@ if is_bnb_4bit_available():
                 compress_statistics=kwargs.get("compress_statistics", True),
                 quant_type=kwargs.get("quant_type", "nf4"),
             )
-            AloraLayer.__init__(self, in_features=in_features, out_features=out_features)
+            AloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
 
             init_lora_weights = kwargs.pop("init_lora_weights", True)
-            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights)
+            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
             self.set_adapter(adapter_name)
-
-        def merge(self):
-            if self.merged:
-                warnings.warn(
-                    f"Already following adapters were merged {','.join(self.merged_adapters)}. "
-                    f"You are now additionally merging {','.join(self.active_adapters)}."
-                )
-            for active_adapter in self.active_adapters:
-                if active_adapter not in self.lora_A.keys():
-                    continue
-                warnings.warn(
-                    "Merge lora module to 4-bit linear may get different generations due to rounding errors."
-                )
-                # Refer to https://gist.github.com/ChrisHayduk/1a53463331f52dca205e55982baf9930
-                kwargs = self.weight.__dict__
-                lora_data = self.get_delta_weight(active_adapter)
-                w_data = bnb.functional.dequantize_4bit(self.weight.data, self.weight.quant_state) + lora_data
-                self.weight = bnb.nn.Params4bit(w_data.to("cpu"), requires_grad=False, **kwargs).to(self.weight.device)
-                self.merged = True
-
-        def unmerge(self):
-            if not self.merged:
-                warnings.warn("Already unmerged. Nothing to do.")
-                return
-            while len(self.merged_adapters) > 0:
-                active_adapter = self.merged_adapters.pop()
-                if active_adapter not in self.lora_A.keys():
-                    continue
-                warnings.warn(
-                    "Unmerge lora module to 4-bit linear may get different generations due to rounding errors."
-                )
-                kwargs = self.weight.__dict__
-                lora_data = self.get_delta_weight(active_adapter)
-                w_data = bnb.functional.dequantize_4bit(self.weight.data, self.weight.quant_state) - lora_data
-                self.weight = bnb.nn.Params4bit(w_data.to("cpu"), requires_grad=False, **kwargs).to(self.weight.device)
-                self.merged = False
 
         def get_delta_weight(self, adapter):
             return (
                 transpose(
-                    self.lora_B[adapter].weight @ self.lora_A[adapter].weight,
+                    self.lora_B[adapter] @ self.lora_A[adapter],
                     False,
                 )
                 * self.scaling[adapter]
             )
 
+
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            if self.disable_adapters:
-                if self.merged:
-                    self.unmerge()
-                result = super().forward(x)
-            elif self.merged:
-                result = super().forward(x)
-            else:
-                result = super().forward(x)
-                # As per Tim Dettmers, for 4bit, we need to defensively clone here.
-                # The reason is that in some cases, an error can occur that backprop
-                # does not work on a manipulated view. This issue may be solved with
-                # newer PyTorch versions but this would need extensive testing to be
-                # sure.
-                result = result.clone()
+            result = super().forward(x)
+            # As per Tim Dettmers, for 4bit, we need to defensively clone here.
+            # The reason is that in some cases, an error can occur that backprop
+            # does not work on a manipulated view. This issue may be solved with
+            # newer PyTorch versions but this would need extensive testing to be
+            # sure.
+            result = result.clone()
 
-                for active_adapter in self.active_adapters:
-                    if active_adapter not in self.lora_A.keys():
-                        continue
-                    lora_A = self.lora_A[active_adapter]
-                    lora_B = self.lora_B[active_adapter]
-                    dropout = self.lora_dropout[active_adapter]
-                    scaling = self.scaling[active_adapter]
+            # The molora model only supports one active adapter at a time
+            active_adapter = self.active_adapters[0]
+            if active_adapter in self.lora_A.keys():
+                lora_A = self.lora_A[active_adapter]
+                lora_B = self.lora_B[active_adapter]
+                lora_router = self.lora_router[active_adapter]
+                dropout = self.lora_dropout[active_adapter]
+                scaling = self.scaling[active_adapter]
 
-                    requires_conversion = not torch.is_autocast_enabled()
-                    if requires_conversion:
-                        expected_dtype = result.dtype
-                        x = x.to(lora_A.weight.dtype)
+                requires_conversion = not torch.is_autocast_enabled()
+                if requires_conversion:
+                    expected_dtype = result.dtype
+                    compute_dtype = lora_A.dtype
+                    if x.dtype != compute_dtype:
+                        x = x.to(compute_dtype)
 
-                    output = lora_B(lora_A(dropout(x)))
-                    if requires_conversion:
-                        output = output.to(expected_dtype)
-                    output = output * scaling
-                    result += output
+                # Compute expert_weights using the routing layer
+                logits = lora_router(x)
+                expert_weights = F.softmax(logits, dim=-1)
+                # Expand expert_weights across sequence length
+                expert_weights = expert_weights.unsqueeze(1).expand(-1, x.shape[1], -1)
+                # Using einsum for lora_A matrix multiplication
+                x_transformed = torch.einsum('bsi,eij->bsej', x, lora_A)
+                x_transformed = dropout(x_transformed)
+
+                # Using einsum for lora_B matrix multiplication
+                output = torch.einsum('bsej,ejk,bse->bsk', x_transformed, lora_B, expert_weights)
+
+                if requires_conversion:
+                    output = output.to(expected_dtype)
+                result += output * scaling
 
             return result

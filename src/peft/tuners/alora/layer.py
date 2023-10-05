@@ -180,13 +180,15 @@ class Linear(nn.Linear, AloraLayer):
             # Compute expert_weights using the routing layer
             logits = lora_router(x)
             expert_weights = F.softmax(logits, dim=-1)
+            # Expand expert_weights across sequence length
+            expert_weights = expert_weights.unsqueeze(1).expand(-1, x.shape[1], -1)
 
             # Using einsum for lora_A matrix multiplication
-            x_transformed = torch.einsum('bi,eij->bej', x, lora_A)
+            x_transformed = torch.einsum('bsi,eij->bsej', x, lora_A)
             x_transformed = dropout(x_transformed)
 
             # Using einsum for lora_B matrix multiplication
-            weighted_output = torch.einsum('bej,ejk,e->bk', x_transformed, lora_B, expert_weights)
+            weighted_output = torch.einsum('bsej,ejk,bse->bsk', x_transformed, lora_B, expert_weights)
             result += weighted_output * scaling
 
         result = result.to(previous_dtype)
