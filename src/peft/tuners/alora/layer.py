@@ -37,7 +37,7 @@ class AloraLayer(BaseTunerLayer):
         self.lora_B = nn.ParameterDict({})
         self.lora_router = nn.ModuleDict({})
 
-        # Mark the weight as unmerged
+        # Mark the weight as unmerged. In this adapter we can't merge weights back into the base model.
         self.merged = False
         self._disable_adapters = False
         self.merged_adapters = []
@@ -150,28 +150,8 @@ class Linear(nn.Linear, AloraLayer):
         self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
         self.set_adapter(adapter_name)
 
-    def merge(self) -> None:
-        if self.merged:
-            warnings.warn(
-                f"Already following adapters were merged {','.join(self.merged_adapters)}. "
-                f"You are now additionally merging {','.join(self.active_adapters)}."
-            )
-        for active_adapter in self.active_adapters:
-            if active_adapter in self.lora_A.keys():
-                self.weight.data += self.get_delta_weight(active_adapter)
-                self.merged_adapters.append(active_adapter)
-                self.merged = True
 
-    def unmerge(self) -> None:
-        if not self.merged:
-            warnings.warn("Already unmerged. Nothing to do.")
-            return
-        while len(self.merged_adapters) > 0:
-            active_adapter = self.merged_adapters.pop()
-            if active_adapter in self.lora_A.keys():
-                self.weight.data -= self.get_delta_weight(active_adapter)
-                self.merged = False
-
+    # Does this makes sense?
     def get_delta_weight(self, adapter) -> torch.Tensor:
         return (
             transpose(
@@ -186,38 +166,28 @@ class Linear(nn.Linear, AloraLayer):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         previous_dtype = x.dtype
-        # expert_weights = torch.tensor([1.0], device=x.device)  # For now, only one expert
+        result = self._linear(x)
 
-        if self.disable_adapters:
-            if self.merged:
-                self.unmerge()
-            result = self._linear(x)
-        elif self.merged:
-            result = self._linear(x)
-        else:
-            result = self._linear(x)
-            for active_adapter in self.active_adapters:
-                if active_adapter not in self.lora_A.keys():
-                    continue
-                lora_A = self.lora_A[active_adapter] # Shape: [num_experts, in_features, r]
-                lora_B = self.lora_B[active_adapter] # Shape: [num_experts, r, out_features]
-                lora_router = self.lora_router[active_adapter]
-                dropout = self.lora_dropout[active_adapter]
-                scaling = self.scaling[active_adapter]
+        # The molora model only supports one active adapter at a time
+        active_adapter = self.active_adapters[0]
+        if active_adapter in self.lora_A.keys():
+            lora_A = self.lora_A[active_adapter] # Shape: [num_experts, in_features, r]
+            lora_B = self.lora_B[active_adapter] # Shape: [num_experts, r, out_features]
+            lora_router = self.lora_router[active_adapter]
+            dropout = self.lora_dropout[active_adapter]
+            scaling = self.scaling[active_adapter]
 
-                # Compute expert_weights using the routing layer
-                logits = lora_router(x)
-                expert_weights = F.softmax(logits, dim=-1)
+            # Compute expert_weights using the routing layer
+            logits = lora_router(x)
+            expert_weights = F.softmax(logits, dim=-1)
 
-                # Using einsum for lora_A matrix multiplication
-                # x_transformed = torch.einsum('bi,ij->bj', x, lora_A)
-                x_transformed = torch.einsum('bi,eij->bej', x, lora_A)
-                x_transformed = dropout(x_transformed)
+            # Using einsum for lora_A matrix multiplication
+            x_transformed = torch.einsum('bi,eij->bej', x, lora_A)
+            x_transformed = dropout(x_transformed)
 
-                # Using einsum for lora_B matrix multiplication
-                # result += torch.einsum('bj,jk->bk', x_transformed, lora_B) * scaling
-                weighted_output = torch.einsum('bej,ejk,e->bk', x_transformed, lora_B, expert_weights)
-                result += weighted_output * scaling
+            # Using einsum for lora_B matrix multiplication
+            weighted_output = torch.einsum('bej,ejk,e->bk', x_transformed, lora_B, expert_weights)
+            result += weighted_output * scaling
 
         result = result.to(previous_dtype)
         return result

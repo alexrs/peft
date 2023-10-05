@@ -308,9 +308,6 @@ class AloraModel(BaseTuner):
     def set_adapter(self, adapter_name):
         for module in self.model.modules():
             if isinstance(module, AloraLayer):
-                if module.merged:
-                    warnings.warn("Adapter cannot be set when the model is merged. Unmerging the model first.")
-                    module.unmerge()
                 module.set_adapter(adapter_name)
 
     @staticmethod
@@ -321,13 +318,9 @@ class AloraModel(BaseTuner):
             peft_config.target_modules = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING[model_config["model_type"]]
         return peft_config
 
-    def _unload_and_optionally_merge(self, merge=True, progressbar: bool = False):
-        if merge:
-            if getattr(self.model, "quantization_method", None) == "gptq":
-                raise ValueError("Cannot merge LORA layers when the model is gptq quantized")
-
+    def _unload(self, progressbar: bool = False):
         key_list = [key for key, _ in self.model.named_modules() if "lora" not in key]
-        desc = "Unloading " + ("and merging " if merge else "") + "model"
+        desc = "Unloading " + "model"
         for key in tqdm(key_list, disable=not progressbar, desc=desc):
             try:
                 parent, target, target_name = _get_submodules(self.model, key)
@@ -360,8 +353,6 @@ class AloraModel(BaseTuner):
                 else:
                     bias = target.bias is not None
                     new_module = torch.nn.Linear(target.in_features, target.out_features, bias=bias)
-                if merge:
-                    target.merge()
                 self._replace_module(parent, target_name, new_module, target)
 
             # save any additional trainable modules part of `modules_to_save`
@@ -593,31 +584,9 @@ class AloraModel(BaseTuner):
                     )
                     target.set_adapter(resetting_active_adapter)
 
-    def merge_and_unload(self, progressbar: bool = False):
-        r"""
-        This method merges the LoRa layers into the base model. This is needed if someone wants to use the base model
-        as a standalone model.
-
-        Args:
-            progressbar (bool): whether to show a progressbar indicating the unload and merge process
-
-        Example:
-
-        ```py
-        >>> from transformers import AutoModelForCausalLM
-        >>> from peft import PeftModel
-
-        >>> base_model = AutoModelForCausalLM.from_pretrained("tiiuae/falcon-40b")
-        >>> peft_model_id = "smangrul/falcon-40B-int4-peft-lora-sfttrainer-sample"
-        >>> model = PeftModel.from_pretrained(base_model, peft_model_id)
-        >>> merged_model = model.merge_and_unload()
-        ```
-        """
-        return self._unload_and_optionally_merge(progressbar=progressbar)
-
     def unload(self):
         """
         Gets back the base model by removing all the lora modules without merging. This gives back the original base
         model.
         """
-        return self._unload_and_optionally_merge(merge=False)
+        return self._unload()

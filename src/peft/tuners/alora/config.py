@@ -53,7 +53,7 @@ class AloraConfig(PeftConfig):
             specified by `lora_alpha`.
     """
 
-    r: int = field(default=8, metadata={"help": "Lora attention dimension"})
+    r: int = field(default=8, metadata={"help": "Alora attention dimension"})
     target_modules: Optional[Union[List[str], str]] = field(
         default=None,
         metadata={
@@ -123,4 +123,4 @@ class AloraConfig(PeftConfig):
     )
 
     def __post_init__(self):
-        self.peft_type = PeftType.LORA
+        self.peft_type = PeftType.ALORA
