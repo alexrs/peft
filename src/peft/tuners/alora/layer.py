@@ -15,7 +15,6 @@
 
 import math
 import warnings
-from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -56,7 +55,7 @@ class AloraLayer(BaseTunerLayer):
         cls.__init__(self, *args, device="meta", **kwargs)
         self.to_empty(device=final_device)
 
-    def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights):
+    def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
         self.r[adapter_name] = r
@@ -69,8 +68,8 @@ class AloraLayer(BaseTunerLayer):
         self.lora_dropout.update(nn.ModuleDict({adapter_name: lora_dropout_layer}))
         # Actual trainable parameters
         if r > 0:
-            self.lora_A[adapter_name] = nn.Parameter(torch.empty((self.in_features, r)))
-            self.lora_B[adapter_name] = nn.Parameter(torch.empty((r, self.out_features)))
+            self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
+            self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name)
@@ -126,7 +125,7 @@ class Linear(nn.Linear, AloraLayer):
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
-        experts: int = 1,
+        num_experts: int = 1,
         **kwargs,
     ) -> None:
         init_lora_weights = kwargs.pop("init_lora_weights", True)
@@ -141,7 +140,7 @@ class Linear(nn.Linear, AloraLayer):
 
         self.fan_in_fan_out = fan_in_fan_out
 
-        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights)
+        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
         self.set_adapter(adapter_name)
 
     def merge(self) -> None:
@@ -180,6 +179,7 @@ class Linear(nn.Linear, AloraLayer):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         previous_dtype = x.dtype
+        expert_weights = torch.tensor([1.0], device=x.device)  # For now, only one expert
 
         if self.disable_adapters:
             if self.merged:
@@ -192,17 +192,20 @@ class Linear(nn.Linear, AloraLayer):
             for active_adapter in self.active_adapters:
                 if active_adapter not in self.lora_A.keys():
                     continue
-                lora_A = self.lora_A[active_adapter]
-                lora_B = self.lora_B[active_adapter]
+                lora_A = self.lora_A[active_adapter] # Shape: [num_experts, in_features, r]
+                lora_B = self.lora_B[active_adapter] # Shape: [num_experts, r, out_features]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
                 # Using einsum for lora_A matrix multiplication
-                x_transformed = torch.einsum('bi,ij->bj', x, lora_A)
+                # x_transformed = torch.einsum('bi,ij->bj', x, lora_A)
+                x_transformed = torch.einsum('bi,eij->bej', x, lora_A)
                 x_transformed = dropout(x_transformed)
 
                 # Using einsum for lora_B matrix multiplication
-                result += torch.einsum('bj,jk->bk', x_transformed, lora_B) * scaling
+                # result += torch.einsum('bj,jk->bk', x_transformed, lora_B) * scaling
+                weighted_output = torch.einsum('bej,ejk,e->bk', x_transformed, lora_B, expert_weights)
+                result += weighted_output * scaling
 
         result = result.to(previous_dtype)
         return result

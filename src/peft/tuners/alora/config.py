@@ -115,6 +115,12 @@ class AloraConfig(PeftConfig):
             )
         },
     )
+    num_experts: Optional[int] = field(
+        default=1,
+        metadata={
+            "help": "The number of experts for MoLora."
+        },
+    )
 
     def __post_init__(self):
         self.peft_type = PeftType.LORA

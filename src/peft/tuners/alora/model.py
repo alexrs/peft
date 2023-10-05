@@ -167,6 +167,7 @@ class AloraModel(BaseTuner):
                 alpha,
                 lora_config.lora_dropout,
                 lora_config.init_lora_weights,
+                lora_config.num_experts,
             )
         else:
             new_module = self._create_new_module(lora_config, adapter_name, target, **kwargs)
