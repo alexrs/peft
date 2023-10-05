@@ -26,7 +26,7 @@ from peft.utils.other import transpose
 
 class AloraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
-    adapter_layer_names = ["lora_A", "lora_B"]
+    adapter_layer_names = ["lora_A", "lora_B", "lora_router"]
 
     def __init__(self, in_features: int, out_features: int, **kwargs):
         self.r = {}
@@ -35,6 +35,8 @@ class AloraLayer(BaseTunerLayer):
         self.lora_dropout = nn.ModuleDict({})
         self.lora_A = nn.ParameterDict({})
         self.lora_B = nn.ParameterDict({})
+        self.lora_router = nn.ModuleDict({})
+
         # Mark the weight as unmerged
         self.merged = False
         self._disable_adapters = False
@@ -70,6 +72,11 @@ class AloraLayer(BaseTunerLayer):
         if r > 0:
             self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
             self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
+            self.lora_router[adapter_name] = nn.Sequential(
+                nn.Linear(self.in_features, 128),
+                nn.ReLU(),
+                nn.Linear(128, num_experts)
+            )
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name)
@@ -135,7 +142,7 @@ class Linear(nn.Linear, AloraLayer):
         # Note that we don't use self._init_empty_weights() for Linear because it is a bit slower and the benefit of
         # added robustness is not big enough for Linear.
 
-        AloraLayer.__init__(self, in_features=in_features, out_features=out_features)
+        AloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
         # Freezing the pre-trained weight matrix
 
         self.fan_in_fan_out = fan_in_fan_out
@@ -179,7 +186,7 @@ class Linear(nn.Linear, AloraLayer):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         previous_dtype = x.dtype
-        expert_weights = torch.tensor([1.0], device=x.device)  # For now, only one expert
+        # expert_weights = torch.tensor([1.0], device=x.device)  # For now, only one expert
 
         if self.disable_adapters:
             if self.merged:
@@ -194,8 +201,13 @@ class Linear(nn.Linear, AloraLayer):
                     continue
                 lora_A = self.lora_A[active_adapter] # Shape: [num_experts, in_features, r]
                 lora_B = self.lora_B[active_adapter] # Shape: [num_experts, r, out_features]
+                lora_router = self.lora_router[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
+
+                # Compute expert_weights using the routing layer
+                logits = lora_router(x)
+                expert_weights = F.softmax(logits, dim=-1)
 
                 # Using einsum for lora_A matrix multiplication
                 # x_transformed = torch.einsum('bi,ij->bj', x, lora_A)
@@ -209,4 +221,3 @@ class Linear(nn.Linear, AloraLayer):
 
         result = result.to(previous_dtype)
         return result
-
