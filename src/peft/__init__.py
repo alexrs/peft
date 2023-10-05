@@ -59,6 +59,8 @@ from .tuners import (
     AdaLoraModel,
     MoLoraConfig,
     MoLoraModel,
+    AloraConfig,
+    AloraModel,
     PrefixEncoder,
     PrefixTuningConfig,
     PromptEmbedding,

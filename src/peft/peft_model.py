@@ -44,6 +44,7 @@ from .tuners import (
     LoKrModel,
     LoraModel,
     MoLoraModel,
+    AloraModel,
     MultitaskPromptEmbedding,
     PrefixEncoder,
     PromptEmbedding,
@@ -79,6 +80,7 @@ PEFT_TYPE_TO_MODEL_MAPPING = {
     PeftType.ADAPTION_PROMPT: AdaptionPromptModel,
     PeftType.IA3: IA3Model,
     PeftType.MOLORA: MoLoraModel,
+    PeftType.ALORA: AloraModel,
 }
 
 
