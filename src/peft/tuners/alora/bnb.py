@@ -90,15 +90,16 @@ if is_bnb_available():
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
                 expert_weights = F.softmax(logits, dim=-1)
-                # Expand expert_weights across sequence length
-                expert_weights = expert_weights.unsqueeze(1).expand(-1, x.shape[1], -1)
 
-                # Using einsum for lora_A matrix multiplication
-                x_transformed = torch.einsum('bsi,eij->bsej', x, lora_A)
-                x_transformed = dropout(x_transformed)
+                # Compute ax using einsum
+                ax = torch.einsum('bsi,eij->bsej', x, lora_A)
+                ax = dropout(ax)
 
-                # Using einsum for lora_B matrix multiplication
-                output = torch.einsum('bsej,ejk,bse->bsk', x_transformed, lora_B, expert_weights)
+                # Compute bax using einsum
+                bax = torch.einsum('bsej,ejk->bske', ax, lora_B)
+
+                # Combine using router probabilities
+                output = torch.einsum('...e,...ek->...k', expert_weights, bax)
 
                 if requires_conversion:
                     output = output.to(expected_dtype)
@@ -151,8 +152,6 @@ if is_bnb_4bit_available():
 
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            print("------------------------------------------------------")
-            print(x.shape)
             result = super().forward(x)
             # As per Tim Dettmers, for 4bit, we need to defensively clone here.
             # The reason is that in some cases, an error can occur that backprop
@@ -180,14 +179,16 @@ if is_bnb_4bit_available():
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
                 expert_weights = F.softmax(logits, dim=-1)
-                # Expand expert_weights across sequence length
-                expert_weights = expert_weights.unsqueeze(1).expand(-1, x.shape[1], -1)
-                # Using einsum for lora_A matrix multiplication
-                x_transformed = torch.einsum('bsi,eij->bsej', x, lora_A)
-                x_transformed = dropout(x_transformed)
 
-                # Using einsum for lora_B matrix multiplication
-                output = torch.einsum('bsej,ejk,bse->bsk', x_transformed, lora_B, expert_weights)
+                # Compute ax using einsum
+                ax = torch.einsum('bsi,eij->bsej', x, lora_A)
+                ax = dropout(ax)
+
+                # Compute bax using einsum
+                bax = torch.einsum('bsej,ejk->bske', ax, lora_B)
+
+                # Combine using router probabilities
+                output = torch.einsum('...e,...ek->...k', expert_weights, bax)
 
                 if requires_conversion:
                     output = output.to(expected_dtype)

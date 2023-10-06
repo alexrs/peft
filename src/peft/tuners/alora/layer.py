@@ -164,6 +164,36 @@ class Linear(nn.Linear, AloraLayer):
     def _linear(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
 
+    # def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #     previous_dtype = x.dtype
+    #     result = self._linear(x)
+
+    #     # The molora model only supports one active adapter at a time
+    #     active_adapter = self.active_adapters[0]
+    #     if active_adapter in self.lora_A.keys():
+    #         lora_A = self.lora_A[active_adapter] # Shape: [num_experts, in_features, r]
+    #         lora_B = self.lora_B[active_adapter] # Shape: [num_experts, r, out_features]
+    #         lora_router = self.lora_router[active_adapter]
+    #         dropout = self.lora_dropout[active_adapter]
+    #         scaling = self.scaling[active_adapter]
+
+    #         # Compute expert_weights using the routing layer
+    #         logits = lora_router(x)
+    #         expert_weights = F.softmax(logits, dim=-1)
+    #         # Expand expert_weights across sequence length
+    #         expert_weights = expert_weights.unsqueeze(1).expand(-1, x.shape[1], -1)
+
+    #         # Using einsum for lora_A matrix multiplication
+    #         x_transformed = torch.einsum('bsi,eij->bsej', x, lora_A)
+    #         x_transformed = dropout(x_transformed)
+
+    #         # Using einsum for lora_B matrix multiplication
+    #         weighted_output = torch.einsum('bsej,ejk,bse->bsk', x_transformed, lora_B, expert_weights)
+    #         result += weighted_output * scaling
+
+    #     result = result.to(previous_dtype)
+    #     return result
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         previous_dtype = x.dtype
         result = self._linear(x)
@@ -180,16 +210,20 @@ class Linear(nn.Linear, AloraLayer):
             # Compute expert_weights using the routing layer
             logits = lora_router(x)
             expert_weights = F.softmax(logits, dim=-1)
-            # Expand expert_weights across sequence length
-            expert_weights = expert_weights.unsqueeze(1).expand(-1, x.shape[1], -1)
 
-            # Using einsum for lora_A matrix multiplication
-            x_transformed = torch.einsum('bsi,eij->bsej', x, lora_A)
-            x_transformed = dropout(x_transformed)
+            # Compute ax using einsum
+            ax = torch.einsum('bsi,eij->bsej', x, lora_A)
+            ax = dropout(ax)
 
-            # Using einsum for lora_B matrix multiplication
-            weighted_output = torch.einsum('bsej,ejk,bse->bsk', x_transformed, lora_B, expert_weights)
-            result += weighted_output * scaling
+            # Compute bax using einsum
+            bax = torch.einsum('bsej,ejk->bske', ax, lora_B)
+
+            # Combine using router probabilities
+            lora_output = torch.einsum('...e,...ek->...k', expert_weights, bax) * scaling
+
+            # Add the output of the original linear layer
+            result += lora_output
 
         result = result.to(previous_dtype)
         return result
+
