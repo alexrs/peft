@@ -151,6 +151,8 @@ if is_bnb_4bit_available():
 
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
+            print("------------------------------------------------------")
+            print(x.shape)
             result = super().forward(x)
             # As per Tim Dettmers, for 4bit, we need to defensively clone here.
             # The reason is that in some cases, an error can occur that backprop
