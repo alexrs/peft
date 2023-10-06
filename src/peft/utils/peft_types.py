@@ -31,7 +31,6 @@ class PeftType(str, enum.Enum):
     LOHA = "LOHA"
     LOKR = "LOKR"
     MOLORA = "MOLORA"
-    ALORA = "ALORA"
 
 
 class TaskType(str, enum.Enum):

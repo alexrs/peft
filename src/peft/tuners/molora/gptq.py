@@ -15,10 +15,10 @@
 
 import torch
 
-from peft.tuners.alora.layer import AloraLayer
+from peft.tuners.molora.layer import MoloraLayer
 
 
-class QuantLinear(torch.nn.Module, AloraLayer):
+class QuantLinear(torch.nn.Module, MoloraLayer):
     def __init__(
         self,
         adapter_name,
@@ -29,7 +29,7 @@ class QuantLinear(torch.nn.Module, AloraLayer):
         **kwargs,
     ):
         torch.nn.Module.__init__(self)
-        AloraLayer.__init__(
+        MoloraLayer.__init__(
             self, in_features=quant_linear_module.infeatures, out_features=quant_linear_module.outfeatures
         )
         self.quant_linear_module = quant_linear_module

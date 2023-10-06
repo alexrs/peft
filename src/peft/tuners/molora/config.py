@@ -21,8 +21,7 @@ from peft.utils import PeftType
 
 
 @dataclass
-class MoLoraConfig(PeftConfig):
-    # TODO: Can we reuse the LoraConfig?
+class MoloraConfig(PeftConfig):
     """
     This is the configuration class to store the configuration of a [`LoraModel`].
 
@@ -52,10 +51,9 @@ class MoLoraConfig(PeftConfig):
         alpha_pattern (`dict`):
             The mapping from layer names or regexp expression to alphas which are different from the default alpha
             specified by `lora_alpha`.
-        num_experts (`int`): The number of experts to use in the MoLora layer.
     """
 
-    r: int = field(default=8, metadata={"help": "Lora attention dimension"})
+    r: int = field(default=8, metadata={"help": "MoLoRA attention dimension"})
     target_modules: Optional[Union[List[str], str]] = field(
         default=None,
         metadata={
@@ -120,10 +118,7 @@ class MoLoraConfig(PeftConfig):
     num_experts: Optional[int] = field(
         default=1,
         metadata={
-            "help": (
-                "The number of experts to use in the MoLora layer. "
-                "For example, if `num_experts=2`, the MoLora layer will have two experts."
-            )
+            "help": "The number of experts for MoLora."
         },
     )
 

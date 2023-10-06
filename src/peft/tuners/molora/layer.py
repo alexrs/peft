@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import math
+import warnings
 
 import torch
 import torch.nn as nn
@@ -23,20 +24,9 @@ from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils.other import transpose
 
 
-class Router(nn.Module):
-    def __init__(self, hidden_dim, num_experts):
-        super(Router, self).__init__()
-        self.linear = nn.Linear(hidden_dim, num_experts)
-
-    def forward(self, x):
-        router_logits = self.linear(x)
-        router_probs = F.softmax(router_logits, dim=-1)
-        return router_probs
-
-
-class MoLoraLayer(BaseTunerLayer):
+class MoloraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
-    adapter_layer_names = ["lora_A", "lora_B"]
+    adapter_layer_names = ["lora_A", "lora_B", "lora_router"]
 
     def __init__(self, in_features: int, out_features: int, **kwargs):
         self.r = {}
@@ -45,7 +35,9 @@ class MoLoraLayer(BaseTunerLayer):
         self.lora_dropout = nn.ModuleDict({})
         self.lora_A = nn.ParameterDict({})
         self.lora_B = nn.ParameterDict({})
-        # Mark the weight as unmerged
+        self.lora_router = nn.ModuleDict({})
+
+        # Mark the weight as unmerged. In this adapter we can't merge weights back into the base model.
         self.merged = False
         self._disable_adapters = False
         self.merged_adapters = []
@@ -78,8 +70,9 @@ class MoLoraLayer(BaseTunerLayer):
         self.lora_dropout.update(nn.ModuleDict({adapter_name: lora_dropout_layer}))
         # Actual trainable parameters
         if r > 0:
-            self.lora_A[adapter_name] = nn.Parameter(torch.randn(num_experts, self.in_features, r) * 2e-2)
-            self.lora_B[adapter_name] = nn.Parameter(torch.zeros(num_experts, r, self.out_features))
+            self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
+            self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
+            self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name)
@@ -93,10 +86,10 @@ class MoLoraLayer(BaseTunerLayer):
                 self.to(weight.device)
         self.set_adapter(self.active_adapters)
 
+
     def reset_lora_parameters(self, adapter_name):
         if adapter_name in self.lora_A.keys():
             # initialize A the same way as the default for nn.Linear and B to zero
-            # TODO: is this the correct initialization?
             nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
             nn.init.zeros_(self.lora_B[adapter_name])
 
@@ -122,58 +115,79 @@ class MoLoraLayer(BaseTunerLayer):
 #  ------------------------------------------------------------------------------------------
 
 
-class Linear(nn.Linear, MoLoraLayer):
+class Linear(nn.Linear, MoloraLayer):
+    # Lora implemented in a dense layer
     def __init__(
         self,
         adapter_name: str,
         in_features: int,
         out_features: int,
-        num_experts: int = 1,
         r: int = 0,
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
+        num_experts: int = 1,
         **kwargs,
     ) -> None:
         init_lora_weights = kwargs.pop("init_lora_weights", True)
-
+        # this gets the init from nn.Linear's super perspective, i.e.
+        # nn.Module.__init__, which should always be called
         super(nn.Linear, self).__init__()
-        MoLoraLayer.__init__(self, in_features=in_features, out_features=out_features)
+        # Note that we don't use self._init_empty_weights() for Linear because it is a bit slower and the benefit of
+        # added robustness is not big enough for Linear.
+
+        MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
+        # Freezing the pre-trained weight matrix
 
         self.fan_in_fan_out = fan_in_fan_out
-        self.lora_router = Router(in_features, num_experts)
 
         self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
         self.set_adapter(adapter_name)
 
 
+    # Does this makes sense?
+    def get_delta_weight(self, adapter) -> torch.Tensor:
+        return (
+            transpose(
+                self.lora_B[adapter] @ self.lora_A[adapter],
+                self.fan_in_fan_out,
+            )
+            * self.scaling[adapter]
+        )
+
     def _linear(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
 
-
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         previous_dtype = x.dtype
-
-        #  Apply the forward pass of the original linear layer
         result = self._linear(x)
-        # we only support a single active adapter
+
+        # The molora model only supports one active adapter at a time
         active_adapter = self.active_adapters[0]
+        if active_adapter in self.lora_A.keys():
+            lora_A = self.lora_A[active_adapter] # Shape: [num_experts, in_features, r]
+            lora_B = self.lora_B[active_adapter] # Shape: [num_experts, r, out_features]
+            lora_router = self.lora_router[active_adapter]
+            dropout = self.lora_dropout[active_adapter]
+            scaling = self.scaling[active_adapter]
 
-        dropout = self.lora_dropout[active_adapter]
-        scaling = self.scaling[active_adapter]
-        x = x.to(self.lora_A[active_adapter])
+            # Compute expert_weights using the routing layer
+            logits = lora_router(x)
+            expert_weights = F.softmax(logits, dim=-1)
 
-        # Routing mechanism
-        router_probs = self.lora_router(x)
-        x = dropout(x)
+            # Compute ax using einsum
+            ax = torch.einsum('bsi,eij->bsej', x, lora_A)
+            ax = dropout(ax)
 
-        # MoLoRa mechanism
-        ax = torch.einsum("bsd,edr->bser", x, self.lora_A[active_adapter])
-        bax = torch.einsum("bser,erd->bsed", ax, self.lora_B[active_adapter])
-        lora_output = torch.einsum("...e,...ed->...d", router_probs, bax) * scaling
+            # Compute bax using einsum
+            bax = torch.einsum('bsej,ejk->bske', ax, lora_B)
 
-        # Add the output of the original linear layer
-        result += lora_output
+            # Combine using router probabilities
+            lora_output = torch.einsum('...e,...ek->...k', expert_weights, bax) * scaling
+
+            # Add the output of the original linear layer
+            result += lora_output
 
         result = result.to(previous_dtype)
-        return lora_output
+        return result
+

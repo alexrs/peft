@@ -14,25 +14,39 @@
 # limitations under the License.
 import re
 import warnings
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from enum import Enum
 from itertools import chain
 
 import torch
+from tqdm import tqdm
 
-from peft.tuners.tuners_utils import BaseTuner, BaseTunerLayer
+from peft.import_utils import is_bnb_4bit_available, is_bnb_available
+from peft.tuners.tuners_utils import BaseTuner, BaseTunerLayer, check_target_module_exists
 from peft.utils import (
-    COMMON_LAYERS_PATTERN,
     TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING,
     ModulesToSaveWrapper,
+    _freeze_adapter,
     _get_submodules,
+    get_auto_gptq_quant_linear,
+    get_quantization_config,
 )
 
-from .config import MoLoraConfig
-from .layer import Linear, MoLoraLayer
+from .config import MoloraConfig
+from .gptq import QuantLinear
+from .layer import Linear, MoloraLayer
 
 
-class MoLoraModel(BaseTuner):
+if is_bnb_available():
+    import bitsandbytes as bnb
+
+    from .bnb import Linear8bitLt
+
+if is_bnb_4bit_available():
+    from .bnb import Linear4bit
+
+
+class MoloraModel(BaseTuner):
     """
     Creates Low Rank Adapter (Lora) model from a pretrained transformers model.
 
@@ -48,9 +62,9 @@ class MoLoraModel(BaseTuner):
 
         ```py
         >>> from transformers import AutoModelForSeq2SeqLM
-        >>> from peft import MoLoraModel, MoLoraConfig
+        >>> from peft import MoloraModel, LoraConfig
 
-        >>> config = MoLoraConfig(
+        >>> config = LoraConfig(
         ...     task_type="SEQ_2_SEQ_LM",
         ...     r=8,
         ...     lora_alpha=32,
@@ -59,15 +73,15 @@ class MoLoraModel(BaseTuner):
         ... )
 
         >>> model = AutoModelForSeq2SeqLM.from_pretrained("t5-base")
-        >>> molora_model = MoLoraModel(model, config, "default")
+        >>> lora_model = MoloraModel(model, config, "default")
         ```
 
         ```py
         >>> import transformers
-        >>> from peft import MoLoraConfig, PeftModel, get_peft_model, prepare_model_for_int8_training
+        >>> from peft import LoraConfig, PeftModel, get_peft_model, prepare_model_for_int8_training
 
         >>> target_modules = ["q_proj", "k_proj", "v_proj", "out_proj", "fc_in", "fc_out", "wte"]
-        >>> config = MoLoraConfig(
+        >>> config = LoraConfig(
         ...     r=4, lora_alpha=16, target_modules=target_modules, lora_dropout=0.1, bias="none", task_type="CAUSAL_LM"
         ... )
 
@@ -81,19 +95,18 @@ class MoLoraModel(BaseTuner):
         ...     load_in_8bit=True,
         ... )
         >>> model = prepare_model_for_int8_training(model)
-        >>> molora_model = get_peft_model(model, config)
+        >>> lora_model = get_peft_model(model, config)
         ```
 
     **Attributes**:
         - **model** ([`~transformers.PreTrainedModel`]) -- The model to be adapted.
-        - **peft_config** ([`MoLoraConfig`]): The configuration of the MoLora model.
+        - **peft_config** ([`LoraConfig`]): The configuration of the Lora model.
     """
 
     def __init__(self, model, config, adapter_name) -> None:
         super().__init__(model, config, adapter_name)
-        # TODO: Support only one trainable adapter as in AdaLoraModel?
 
-    def _check_new_adapter_config(self, config: MoLoraConfig) -> None:
+    def _check_new_adapter_config(self, config: MoloraConfig) -> None:
         """
         A helper method to check the config when a new adapter is being added.
 
@@ -110,32 +123,7 @@ class MoLoraModel(BaseTuner):
 
     @staticmethod
     def _check_target_module_exists(lora_config, key):
-        if isinstance(lora_config.target_modules, str):
-            target_module_found = re.fullmatch(lora_config.target_modules, key)
-        else:
-            target_module_found = any(
-                re.match(f".*\.{target_key}$", key) for target_key in lora_config.target_modules
-            ) or any(target_key == key for target_key in lora_config.target_modules)
-            is_using_layer_indexes = getattr(lora_config, "layers_to_transform", None) is not None
-            layer_indexing_pattern = getattr(lora_config, "layers_pattern", None)
-
-            if is_using_layer_indexes and target_module_found:
-                layers_pattern = COMMON_LAYERS_PATTERN if layer_indexing_pattern is None else layer_indexing_pattern
-                layers_pattern = [layers_pattern] if isinstance(layers_pattern, str) else layers_pattern
-
-                for pattern in layers_pattern:
-                    layer_index = re.match(f".*.{pattern}\.(\d+)\.*", key)
-                    if layer_index is not None:
-                        layer_index = int(layer_index.group(1))
-                        if isinstance(lora_config.layers_to_transform, int):
-                            target_module_found = layer_index == lora_config.layers_to_transform
-                        else:
-                            target_module_found = layer_index in lora_config.layers_to_transform
-
-                        break
-                    else:
-                        target_module_found = False
-        return target_module_found
+        return check_target_module_exists(lora_config, key)
 
     def _create_and_replace(
         self,
@@ -163,16 +151,23 @@ class MoLoraModel(BaseTuner):
             "fan_in_fan_out": lora_config.fan_in_fan_out,
             "init_lora_weights": lora_config.init_lora_weights,
         }
+        kwargs["loaded_in_8bit"] = optional_kwargs.pop("loaded_in_8bit", False)
+        kwargs["loaded_in_4bit"] = optional_kwargs.pop("loaded_in_4bit", False)
         kwargs["bias"] = bias
 
+        quantization_config = get_quantization_config(self.model, method="gptq")
+        if quantization_config is not None:
+            kwargs["gptq_quantization_config"] = quantization_config
+
         # TODO: better deal with that
-        if isinstance(target, MoLoraLayer):
+        if isinstance(target, MoloraLayer):
             target.update_layer(
                 adapter_name,
                 r,
                 alpha,
                 lora_config.lora_dropout,
                 lora_config.init_lora_weights,
+                lora_config.num_experts,
             )
         else:
             new_module = self._create_new_module(lora_config, adapter_name, target, **kwargs)
@@ -206,24 +201,72 @@ class MoLoraModel(BaseTuner):
             if "lora_" not in n:
                 p.requires_grad = False
 
+        for active_adapter in self.active_adapters:
+            bias = self.peft_config[active_adapter].bias
+            if bias == "none":
+                continue
+
+            if bias == "all":
+                for n, p in self.model.named_parameters():
+                    if "bias" in n:
+                        p.requires_grad = True
+            elif bias == "lora_only":
+                for m in self.model.modules():
+                    if isinstance(m, MoloraLayer) and hasattr(m, "bias") and m.bias is not None:
+                        m.bias.requires_grad = True
+            else:
+                raise NotImplementedError(f"Requested bias: {bias}, is not implemented.")
+
     @staticmethod
     def _create_new_module(lora_config, adapter_name, target, **kwargs):
+        gptq_quantization_config = kwargs.get("gptq_quantization_config", None)
+        AutoGPTQQuantLinear = get_auto_gptq_quant_linear(gptq_quantization_config)
+
+        loaded_in_8bit = kwargs.pop("loaded_in_8bit", False)
+        loaded_in_4bit = kwargs.pop("loaded_in_4bit", False)
         bias = kwargs.pop("bias", False)
 
-        if isinstance(target, torch.nn.Linear):
-            in_features, out_features = target.in_features, target.out_features
-            if kwargs["fan_in_fan_out"]:
-                warnings.warn(
-                    "fan_in_fan_out is set to True but the target module is `torch.nn.Linear`. "
-                    "Setting fan_in_fan_out to False."
-                )
-                kwargs["fan_in_fan_out"] = lora_config.fan_in_fan_out = False
-        else:
-            raise ValueError(
-                f"Target module {target} is not supported. Currently, only the following modules are supported: "
-                "`torch.nn.Linear`"
+        if loaded_in_8bit and isinstance(target, bnb.nn.Linear8bitLt):
+            eightbit_kwargs = kwargs.copy()
+            eightbit_kwargs.update(
+                {
+                    "has_fp16_weights": target.state.has_fp16_weights,
+                    "memory_efficient_backward": target.state.memory_efficient_backward,
+                    "threshold": target.state.threshold,
+                    "index": target.index,
+                }
             )
-        new_module = Linear(adapter_name, in_features, out_features, bias=bias, **kwargs)
+            new_module = Linear8bitLt(
+                adapter_name, target.in_features, target.out_features, bias=bias, **eightbit_kwargs
+            )
+        elif loaded_in_4bit and is_bnb_4bit_available() and isinstance(target, bnb.nn.Linear4bit):
+            fourbit_kwargs = kwargs.copy()
+            fourbit_kwargs.update(
+                {
+                    "compute_dtype": target.compute_dtype,
+                    "compress_statistics": target.weight.compress_statistics,
+                    "quant_type": target.weight.quant_type,
+                }
+            )
+            new_module = Linear4bit(adapter_name, target.in_features, target.out_features, bias=bias, **fourbit_kwargs)
+        elif AutoGPTQQuantLinear is not None and isinstance(target, AutoGPTQQuantLinear):
+            new_module = QuantLinear(adapter_name, target, **kwargs)
+            target.weight = target.qweight
+        else:
+            if isinstance(target, torch.nn.Linear):
+                in_features, out_features = target.in_features, target.out_features
+                if kwargs["fan_in_fan_out"]:
+                    warnings.warn(
+                        "fan_in_fan_out is set to True but the target module is `torch.nn.Linear`. "
+                        "Setting fan_in_fan_out to False."
+                    )
+                    kwargs["fan_in_fan_out"] = lora_config.fan_in_fan_out = False
+            else:
+                raise ValueError(
+                    f"Target module {target} is not supported. Currently, only the following modules are supported: "
+                    "`torch.nn.Linear`."
+                )
+            new_module = Linear(adapter_name, in_features, out_features, bias=bias, **kwargs)
 
         return new_module
 
@@ -264,10 +307,7 @@ class MoLoraModel(BaseTuner):
 
     def set_adapter(self, adapter_name):
         for module in self.model.modules():
-            if isinstance(module, MoLoraLayer):
-                if module.merged:
-                    warnings.warn("Adapter cannot be set when the model is merged. Unmerging the model first.")
-                    module.unmerge()
+            if isinstance(module, MoloraLayer):
                 module.set_adapter(adapter_name)
 
     @staticmethod
@@ -277,6 +317,237 @@ class MoLoraModel(BaseTuner):
                 raise ValueError("Please specify `target_modules` in `peft_config`")
             peft_config.target_modules = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING[model_config["model_type"]]
         return peft_config
+
+    def _unload(self, progressbar: bool = False):
+        key_list = [key for key, _ in self.model.named_modules() if "lora" not in key]
+        desc = "Unloading " + "model"
+        for key in tqdm(key_list, disable=not progressbar, desc=desc):
+            try:
+                parent, target, target_name = _get_submodules(self.model, key)
+            except AttributeError:
+                continue
+            if isinstance(target, MoloraLayer):
+                if is_bnb_available() and isinstance(target, bnb.nn.Linear8bitLt):
+                    bias = target.bias is not None
+                    new_module = bnb.nn.Linear8bitLt(
+                        target.in_features,
+                        target.out_features,
+                        bias=bias,
+                        has_fp16_weights=target.state.has_fp16_weights,
+                        memory_efficient_backward=target.state.memory_efficient_backward,
+                        threshold=target.state.threshold,
+                        index=target.index,
+                        device=target.weight.device,
+                    )
+                elif is_bnb_4bit_available() and isinstance(target, bnb.nn.Linear4bit):
+                    bias = target.bias is not None
+                    new_module = bnb.nn.Linear4bit(
+                        target.in_features,
+                        target.out_features,
+                        bias=bias,
+                        compute_dtype=target.compute_dtype,
+                        compress_statistics=target.weight.compress_statistics,
+                        quant_type=target.weight.quant_type,
+                        device=target.weight.device,
+                    )
+                else:
+                    bias = target.bias is not None
+                    new_module = torch.nn.Linear(target.in_features, target.out_features, bias=bias)
+                self._replace_module(parent, target_name, new_module, target)
+
+            # save any additional trainable modules part of `modules_to_save`
+            if isinstance(target, ModulesToSaveWrapper):
+                setattr(parent, target_name, target.modules_to_save[target.active_adapter])
+
+        return self.model
+
+    def add_weighted_adapter(
+        self,
+        adapters,
+        weights,
+        adapter_name,
+        combination_type="svd",
+        svd_rank=None,
+        svd_clamp=None,
+        svd_full_matrices=True,
+        svd_driver=None,
+    ):
+        """
+        This method adds a new adapter by merging the given adapters with the given weights.
+
+        When using the `cat` combination_type you should be aware that rank of the resulting adapter will be equal to
+        the sum of all adapters ranks. So it's possible that the mixed adapter may become too big and result in OOM
+        errors.
+
+        Args:
+            adapters (`list`):
+                List of adapter names to be merged.
+            weights (`list`):
+                List of weights for each adapter.
+            adapter_name (`str`):
+                Name of the new adapter.
+            combination_type (`str`):
+                Type of merging. Can be one of [`svd`, `linear`, `cat`]. When using the `cat` combination_type you
+                should be aware that rank of the resulting adapter will be equal to the sum of all adapters ranks. So
+                it's possible that the mixed adapter may become too big and result in OOM errors.
+            svd_rank (`int`, *optional*):
+                Rank of output adapter for svd. If None provided, will use max rank of merging adapters.
+            svd_clamp (`float`, *optional*):
+                A quantile threshold for clamping SVD decomposition output. If None is provided, do not perform
+                clamping. Defaults to None.
+            svd_full_matrices (`bool`, *optional*):
+                Controls whether to compute the full or reduced SVD, and consequently, the shape of the returned
+                tensors U and Vh. Defaults to True.
+            svd_driver (`str`, *optional*):
+                Name of the cuSOLVER method to be used. This keyword argument only works when merging on CUDA. Can be
+                one of [None, `gesvd`, `gesvdj`, `gesvda`]. For more info please refer to `torch.linalg.svd`
+                documentation. Defaults to None.
+        """
+
+        if adapter_name in list(self.peft_config.keys()):
+            return
+        for adapter in adapters:
+            if adapter not in list(self.peft_config.keys()):
+                raise ValueError(f"Adapter {adapter} does not exist")
+
+        # if there is only one adapter, we can only use linear merging
+        combination_type = "linear" if len(adapters) == 1 else combination_type
+
+        adapters_ranks = [self.peft_config[adapter].r for adapter in adapters]
+        if combination_type == "linear":
+            # all adapters ranks should be same, new rank is just this value
+            if len(set(adapters_ranks)) != 1:
+                raise ValueError("All adapters must have the same r value when using `linear` combination_type")
+            new_rank = adapters_ranks[0]
+        elif combination_type == "cat":
+            # adapters ranks may be different, new rank is sum of all ranks
+            # be careful, because output adapter rank may be really big if mixing a lot of adapters
+            new_rank = sum(adapters_ranks)
+        elif combination_type == "svd":
+            # new rank is the max of all ranks of the adapters if not provided
+            new_rank = svd_rank or max(adapters_ranks)
+        else:
+            raise ValueError(f"Invalid combination_type: {combination_type}")
+
+        target_modules_type = type(self.peft_config[adapters[0]].target_modules)
+        new_target_modules = set() if target_modules_type == list else ""
+        for adapter in adapters:
+            if type(self.peft_config[adapter].target_modules) != target_modules_type:
+                raise ValueError(
+                    "all adapter configs should follow the same target modules type. "
+                    "Combining adapters with `target_modules` type being a mix of list and string is not supported."
+                )
+            if target_modules_type == list:
+                new_target_modules |= set(self.peft_config[adapter].target_modules)
+            else:
+                new_target_modules += f"({self.peft_config[adapter].target_modules})|"
+
+        new_target_modules = list(new_target_modules) if target_modules_type == list else new_target_modules[:-1]
+
+        self.peft_config[adapter_name] = replace(
+            self.peft_config[adapters[0]],
+            r=new_rank,
+            lora_alpha=new_rank,
+            target_modules=new_target_modules,
+        )
+        self.inject_adapter(self.model, adapter_name)
+
+        # Do we really need that?
+        _freeze_adapter(self.model, adapter_name)
+
+        key_list = [key for key, _ in self.model.named_modules() if "lora" not in key]
+        for key in key_list:
+            _, target, _ = _get_submodules(self.model, key)
+            if isinstance(target, MoloraLayer):
+                if adapter_name in target.lora_A:
+                    target_lora_A = target.lora_A[adapter_name]
+                    target_lora_B = target.lora_B[adapter_name]
+                else:
+                    continue
+
+                target_lora_A.data = target_lora_A.data * 0.0
+                target_lora_B.data = target_lora_B.data * 0.0
+                if combination_type == "linear":
+                    for adapter, weight in zip(adapters, weights):
+                        if adapter in target.lora_A:
+                            current_adapter_lora_A = target.lora_A[adapter]
+                            current_adapter_lora_B = target.lora_B[adapter]
+                        else:
+                            continue
+                        target_lora_A.data += current_adapter_lora_A.data * weight * target.scaling[adapter]
+                        target_lora_B.data += current_adapter_lora_B.data
+                elif combination_type == "cat":
+                    loras_A, loras_B = [], []
+                    for adapter, weight in zip(adapters, weights):
+                        if adapter in target.lora_A:
+                            current_adapter_lora_A = target.lora_A[adapter]
+                            current_adapter_lora_B = target.lora_B[adapter]
+                        else:
+                            continue
+                        loras_A.append(current_adapter_lora_A.data * weight * target.scaling[adapter])
+                        loras_B.append(current_adapter_lora_B.data)
+
+                    if len(loras_A) == 0:
+                        raise ValueError("No matching LoRAs found. Please raise an issue on Github.")
+                    loras_A = torch.cat(loras_A, dim=0)
+                    loras_B = torch.cat(loras_B, dim=1)
+                    target_lora_A.data[: loras_A.shape[0], :] = loras_A
+                    target_lora_B.data[:, : loras_B.shape[1]] = loras_B
+                elif combination_type == "svd":
+                    target_lora_A.data, target_lora_B.data = self._svd_weighted_adapter(
+                        adapters,
+                        weights,
+                        new_rank,
+                        target,
+                        target_lora_A,
+                        target_lora_B,
+                        svd_clamp,
+                        full_matrices=svd_full_matrices,
+                        driver=svd_driver,
+                    )
+
+    def _svd_weighted_adapter(
+        self,
+        adapters,
+        weights,
+        new_rank,
+        target,
+        target_lora_A,
+        target_lora_B,
+        clamp=None,
+        full_matrices=True,
+        driver=None,
+    ):
+        valid_adapters = []
+        valid_weights = []
+        for adapter, weight in zip(adapters, weights):
+            if adapter in target.lora_A:
+                valid_adapters.append(adapter)
+                valid_weights.append(weight)
+
+        # if no valid adapter, nothing to do
+        if len(valid_adapters) == 0:
+            raise ValueError("No matching LoRAs found. Please raise an issue on Github.")
+
+        delta_weight = valid_weights[0] * target.get_delta_weight(valid_adapters[0])
+        for adapter, weight in zip(valid_adapters[1:], valid_weights[1:]):
+            delta_weight += weight * target.get_delta_weight(adapter)
+        if hasattr(target, "fan_in_fan_out") and target.fan_in_fan_out:
+            delta_weight = delta_weight.T
+
+        # based on https://github.com/kohya-ss/sd-scripts/blob/main/networks/svd_merge_lora.py#L114-L131
+        U, S, Vh = torch.linalg.svd(delta_weight, full_matrices=full_matrices, driver=driver)
+        U = U[:, :new_rank]
+        S = S[:new_rank]
+        U = U @ torch.diag(S)
+        Vh = Vh[:new_rank, :]
+        if clamp is not None:
+            dist = torch.cat([U.flatten(), Vh.flatten()])
+            hi_val = torch.quantile(dist, clamp)
+            low_val = -hi_val
+            U = U.clamp(low_val, hi_val)
+            Vh = Vh.clamp(low_val, hi_val)
+        return Vh, U
 
     def delete_adapter(self, adapter_name: str):
         """
@@ -292,7 +563,7 @@ class MoLoraModel(BaseTuner):
         key_list = [key for key, _ in self.model.named_modules() if "lora" not in key]
         for key in key_list:
             _, target, _ = _get_submodules(self.model, key)
-            if isinstance(target, MoLoraLayer):
+            if isinstance(target, MoloraLayer):
                 for attr in [
                     "r",
                     "lora_alpha",
@@ -313,11 +584,9 @@ class MoLoraModel(BaseTuner):
                     )
                     target.set_adapter(resetting_active_adapter)
 
-    # TODO: Can we merge and unmerge these weights? Probably not.
-    # TODO: Unloading also does not make sense, does it?
     def unload(self):
         """
         Gets back the base model by removing all the lora modules without merging. This gives back the original base
         model.
         """
-        return self._unload_and_optionally_merge(merge=False)
+        return self._unload()

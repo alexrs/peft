@@ -22,12 +22,12 @@ import torch.nn.functional as F
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
 from peft.utils.other import transpose
 
-from .layer import AloraLayer
+from .layer import MoloraLayer
 
 
 if is_bnb_available():
 
-    class Linear8bitLt(bnb.nn.Linear8bitLt, AloraLayer):
+    class Linear8bitLt(bnb.nn.Linear8bitLt, MoloraLayer):
         # Lora implemented in a dense layer
         def __init__(
             self,
@@ -50,7 +50,7 @@ if is_bnb_available():
                 threshold=kwargs.get("threshold", 0.0),
                 index=kwargs.get("index", None),
             )
-            AloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
+            MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
@@ -110,7 +110,7 @@ if is_bnb_available():
 
 if is_bnb_4bit_available():
 
-    class Linear4bit(bnb.nn.Linear4bit, AloraLayer):
+    class Linear4bit(bnb.nn.Linear4bit, MoloraLayer):
         # Lora implemented in a dense layer
         def __init__(
             self,
@@ -132,7 +132,7 @@ if is_bnb_4bit_available():
                 compress_statistics=kwargs.get("compress_statistics", True),
                 quant_type=kwargs.get("quant_type", "nf4"),
             )
-            AloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
+            MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False

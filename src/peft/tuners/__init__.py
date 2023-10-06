@@ -23,8 +23,7 @@ from .loha import LoHaConfig, LoHaModel
 from .lokr import LoKrConfig, LoKrModel
 from .ia3 import IA3Config, IA3Model
 from .adalora import AdaLoraConfig, AdaLoraModel
-from .molora import MoLoraConfig, MoLoraModel
-from .alora import AloraConfig, AloraModel
+from .molora import MoloraConfig, MoloraModel
 from .p_tuning import PromptEncoder, PromptEncoderConfig, PromptEncoderReparameterizationType
 from .prefix_tuning import PrefixEncoder, PrefixTuningConfig
 from .prompt_tuning import PromptEmbedding, PromptTuningConfig, PromptTuningInit
@@ -35,6 +34,5 @@ TUNERS_MAPPING = {
     "LORA": LoraModel,
     "IA3": IA3Model,
     "ADALORA": AdaLoraModel,
-    "MOLORA": MoLoraModel,
-    "ALORA": AloraModel,
+    "MOLORA": MoloraModel,
 }
