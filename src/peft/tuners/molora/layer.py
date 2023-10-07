@@ -26,7 +26,7 @@ from peft.utils.other import transpose
 
 class MoloraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
-    adapter_layer_names = ["lora_A", "lora_B", "lora_router"]
+    adapter_layer_names = ["lora_A", "lora_B"] #, "lora_router"]
 
     def __init__(self, in_features: int, out_features: int, **kwargs):
         self.r = {}
@@ -35,7 +35,7 @@ class MoloraLayer(BaseTunerLayer):
         self.lora_dropout = nn.ModuleDict({})
         self.lora_A = nn.ParameterDict({})
         self.lora_B = nn.ParameterDict({})
-        self.lora_router = nn.ModuleDict({})
+        # self.lora_router = nn.ModuleDict({})
 
         # Mark the weight as unmerged. In this adapter we can't merge weights back into the base model.
         self.merged = False
@@ -70,9 +70,11 @@ class MoloraLayer(BaseTunerLayer):
         self.lora_dropout.update(nn.ModuleDict({adapter_name: lora_dropout_layer}))
         # Actual trainable parameters
         if r > 0:
-            self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
-            self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
-            self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
+            # self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
+            # self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
+            # self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
+            self.lora_A[adapter_name] = nn.Parameter(torch.empty((self.in_features, r)))
+            self.lora_B[adapter_name] = nn.Parameter(torch.empty((r, self.out_features)))
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name)
@@ -162,32 +164,57 @@ class Linear(nn.Linear, MoloraLayer):
         previous_dtype = x.dtype
         result = self._linear(x)
 
-        # The molora model only supports one active adapter at a time
         active_adapter = self.active_adapters[0]
         if active_adapter in self.lora_A.keys():
-            lora_A = self.lora_A[active_adapter] # Shape: [num_experts, in_features, r]
-            lora_B = self.lora_B[active_adapter] # Shape: [num_experts, r, out_features]
-            lora_router = self.lora_router[active_adapter]
+            lora_A = self.lora_A[active_adapter]  # Shape: [in_features, r]
+            lora_B = self.lora_B[active_adapter]  # Shape: [r, out_features]
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
 
-            # Compute expert_weights using the routing layer
-            logits = lora_router(x)
-            expert_weights = F.softmax(logits, dim=-1)
-
             # Compute ax using einsum
-            ax = torch.einsum('bsi,eij->bsej', x, lora_A)
+            ax = torch.einsum('bsi,ij->bsj', x, lora_A)
             ax = dropout(ax)
 
             # Compute bax using einsum
-            bax = torch.einsum('bsej,ejk->bske', ax, lora_B)
-
-            # Combine using router probabilities
-            lora_output = torch.einsum('...e,...ek->...k', expert_weights, bax) * scaling
+            lora_output = torch.einsum('bsj,jk->bsk', ax, lora_B) * scaling
 
             # Add the output of the original linear layer
             result += lora_output
 
         result = result.to(previous_dtype)
         return result
+
+
+    # def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #     previous_dtype = x.dtype
+    #     result = self._linear(x)
+
+    #     # The molora model only supports one active adapter at a time
+    #     active_adapter = self.active_adapters[0]
+    #     if active_adapter in self.lora_A.keys():
+    #         lora_A = self.lora_A[active_adapter] # Shape: [num_experts, in_features, r]
+    #         lora_B = self.lora_B[active_adapter] # Shape: [num_experts, r, out_features]
+    #         lora_router = self.lora_router[active_adapter]
+    #         dropout = self.lora_dropout[active_adapter]
+    #         scaling = self.scaling[active_adapter]
+
+    #         # Compute expert_weights using the routing layer
+    #         logits = lora_router(x)
+    #         expert_weights = F.softmax(logits, dim=-1)
+
+    #         # Compute ax using einsum
+    #         ax = torch.einsum('bsi,eij->bsej', x, lora_A)
+    #         ax = dropout(ax)
+
+    #         # Compute bax using einsum
+    #         bax = torch.einsum('bsej,ejk->bske', ax, lora_B)
+
+    #         # Combine using router probabilities
+    #         lora_output = torch.einsum('...e,...ek->...k', expert_weights, bax) * scaling
+
+    #         # Add the output of the original linear layer
+    #         result += lora_output
+
+    #     result = result.to(previous_dtype)
+    #     return result
 
