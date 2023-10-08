@@ -211,14 +211,12 @@ if is_bnb_4bit_available():
                 # expert_weights = F.softmax(logits, dim=-1)
 
                 # Compute ax using einsum
-                ax = torch.einsum('bsi,eij->bsej', x, lora_A)
+                ax = torch.einsum('bsd,edr->bser', x, lora_A)
                 ax = dropout(ax)
-
                 # Compute bax using einsum
-                bax = torch.einsum('bsej,ejk->bske', ax, lora_B)
-
+                bax = torch.einsum('bser,erd->bsed', ax, lora_B)
                 # Combine using router probabilities
-                output = torch.einsum('...e,...ek->...k', torch.tensor([1.0]).to(bax.device), bax)
+                output = torch.einsum('...e,...ed->...d', torch.ones([1, 1, 1]).to(bax.device), bax)
 
                 if requires_conversion:
                     output = output.to(expected_dtype)
