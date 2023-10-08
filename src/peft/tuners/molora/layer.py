@@ -86,16 +86,15 @@ class MoloraLayer(BaseTunerLayer):
                 self.to(weight.device)
         self.set_adapter(self.active_adapters)
 
-
     def reset_lora_parameters(self, adapter_name):
         if adapter_name in self.lora_A.keys():
             # initialize each expert using kaiming_uniform_
-            for i in range(self.lora_A[adapter_name].shape[0]):
-                # initialize A the same way as the default for nn.Linear and B to zero
-                nn.init.kaiming_uniform_(self.lora_A[adapter_name][i], a=math.sqrt(5))
-                nn.init.zeros_(self.lora_B[adapter_name][i])
-            # nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
-            # nn.init.zeros_(self.lora_B[adapter_name])
+            # for i in range(self.lora_A[adapter_name].shape[0]):
+            #     # initialize A the same way as the default for nn.Linear and B to zero
+            #     nn.init.kaiming_uniform_(self.lora_A[adapter_name][i], a=math.sqrt(5))
+            #     nn.init.zeros_(self.lora_B[adapter_name][i])
+            nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
+            nn.init.zeros_(self.lora_B[adapter_name])
 
     def scale_layer(self, scale_factor: float) -> None:
         if scale_factor != 1:
