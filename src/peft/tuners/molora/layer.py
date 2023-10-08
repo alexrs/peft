@@ -73,8 +73,8 @@ class MoloraLayer(BaseTunerLayer):
             # self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
             # self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
             # self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
-            self.lora_A[adapter_name] = nn.Parameter(torch.empty((self.in_features, r)))
-            self.lora_B[adapter_name] = nn.Parameter(torch.empty((r, self.out_features)))
+            self.lora_A[adapter_name] = nn.Parameter(torch.empty((1, self.in_features, r)))
+            self.lora_B[adapter_name] = nn.Parameter(torch.empty((1, r, self.out_features)))
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name)
@@ -91,9 +91,13 @@ class MoloraLayer(BaseTunerLayer):
 
     def reset_lora_parameters(self, adapter_name):
         if adapter_name in self.lora_A.keys():
-            # initialize A the same way as the default for nn.Linear and B to zero
-            nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
-            nn.init.zeros_(self.lora_B[adapter_name])
+            # initialize each expert using kaiming_uniform_
+            for i in range(self.lora_A[adapter_name].shape[0]):
+                # initialize A the same way as the default for nn.Linear and B to zero
+                nn.init.kaiming_uniform_(self.lora_A[adapter_name][i], a=math.sqrt(5))
+                nn.init.zeros_(self.lora_B[adapter_name][i])
+            # nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
+            # nn.init.zeros_(self.lora_B[adapter_name])
 
     def scale_layer(self, scale_factor: float) -> None:
         if scale_factor != 1:
