@@ -26,7 +26,7 @@ from peft.utils.other import transpose
 
 class MoloraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
-    adapter_layer_names = ["lora_A", "lora_B"] #, "lora_router"]
+    adapter_layer_names = ["lora_A", "lora_B", "lora_router"]
 
     def __init__(self, in_features: int, out_features: int, **kwargs):
         self.r = {}
@@ -35,7 +35,7 @@ class MoloraLayer(BaseTunerLayer):
         self.lora_dropout = nn.ModuleDict({})
         self.lora_A = nn.ParameterDict({})
         self.lora_B = nn.ParameterDict({})
-        # self.lora_router = nn.ModuleDict({})
+        self.lora_router = nn.ModuleDict({})
 
         # Mark the weight as unmerged. In this adapter we can't merge weights back into the base model.
         self.merged = False
@@ -70,11 +70,9 @@ class MoloraLayer(BaseTunerLayer):
         self.lora_dropout.update(nn.ModuleDict({adapter_name: lora_dropout_layer}))
         # Actual trainable parameters
         if r > 0:
-            # self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
-            # self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
-            # self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
-            self.lora_A[adapter_name] = nn.Parameter(torch.empty((1, self.in_features, r)))
-            self.lora_B[adapter_name] = nn.Parameter(torch.empty((1, r, self.out_features)))
+            self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
+            self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
+            self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name)

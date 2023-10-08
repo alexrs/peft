@@ -571,7 +571,7 @@ class MoloraModel(BaseTuner):
                     "lora_A",
                     "lora_B",
                     "lora_dropout",
-                    # "lora_router",
+                    "lora_router",
                 ]:
                     if adapter_name in getattr(target, attr):
                         getattr(target, attr).pop(adapter_name)

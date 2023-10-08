@@ -195,7 +195,7 @@ if is_bnb_4bit_available():
             if active_adapter in self.lora_A.keys():
                 lora_A = self.lora_A[active_adapter]
                 lora_B = self.lora_B[active_adapter]
-                # lora_router = self.lora_router[active_adapter]
+                lora_router = self.lora_router[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
@@ -207,8 +207,8 @@ if is_bnb_4bit_available():
                         x = x.to(compute_dtype)
 
                 # Compute expert_weights using the routing layer
-                # logits = lora_router(x)
-                # expert_weights = F.softmax(logits, dim=-1)
+                logits = lora_router(x)
+                expert_weights = F.softmax(logits, dim=-1)
 
                 # Compute ax using einsum
                 ax = torch.einsum('bsd,edr->bser', x, lora_A)
@@ -216,7 +216,7 @@ if is_bnb_4bit_available():
                 # Compute bax using einsum
                 bax = torch.einsum('bser,erd->bsed', ax, lora_B)
                 # Combine using router probabilities
-                output = torch.einsum('...e,...ed->...d', torch.ones([1, 1, 1]).to(bax.device), bax)
+                output = torch.einsum('...e,...ed->...d', expert_weights, bax)
 
                 if requires_conversion:
                     output = output.to(expected_dtype)
