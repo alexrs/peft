@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import warnings
 
 import bitsandbytes as bnb
 import torch
@@ -58,7 +57,6 @@ if is_bnb_available():
             self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
             self.set_adapter(adapter_name)
 
-
         def get_delta_weight(self, adapter):
             return (
                 transpose(
@@ -68,52 +66,15 @@ if is_bnb_available():
                 * self.scaling[adapter]
             )
 
-        # def forward(self, x: torch.Tensor) -> torch.Tensor:
-        #     result = super().forward(x)
-
-        #     # The molora model only supports one active adapter at a time
-        #     active_adapter = self.active_adapters[0]
-        #     if active_adapter in self.lora_A.keys():
-        #         lora_A = self.lora_A[active_adapter]
-        #         lora_B = self.lora_B[active_adapter]
-        #         lora_router = self.lora_router[active_adapter]
-        #         dropout = self.lora_dropout[active_adapter]
-        #         scaling = self.scaling[active_adapter]
-
-        #         requires_conversion = not torch.is_autocast_enabled()
-        #         if requires_conversion:
-        #             expected_dtype = result.dtype
-        #             compute_dtype = lora_A.dtype
-        #             if x.dtype != compute_dtype:
-        #                 x = x.to(compute_dtype)
-
-        #         # Compute expert_weights using the routing layer
-        #         logits = lora_router(x)
-        #         expert_weights = F.softmax(logits, dim=-1)
-
-        #         # Compute ax using einsum
-        #         ax = torch.einsum('bsi,eij->bsej', x, lora_A)
-        #         ax = dropout(ax)
-
-        #         # Compute bax using einsum
-        #         bax = torch.einsum('bsej,ejk->bske', ax, lora_B)
-
-        #         # Combine using router probabilities
-        #         output = torch.einsum('...e,...ek->...k', expert_weights, bax)
-
-        #         if requires_conversion:
-        #             output = output.to(expected_dtype)
-        #         result += output * scaling
-
-        #     return result
-
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             result = super().forward(x)
 
+            # The molora model only supports one active adapter at a time
             active_adapter = self.active_adapters[0]
             if active_adapter in self.lora_A.keys():
-                lora_A = self.lora_A[active_adapter]  # Shape: [in_features, r]
-                lora_B = self.lora_B[active_adapter]  # Shape: [r, out_features]
+                lora_A = self.lora_A[active_adapter]
+                lora_B = self.lora_B[active_adapter]
+                lora_router = self.lora_router[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
@@ -124,18 +85,23 @@ if is_bnb_available():
                     if x.dtype != compute_dtype:
                         x = x.to(compute_dtype)
 
-                # Compute ax using einsum
-                ax = torch.einsum('bsi,ij->bsj', x, lora_A)
-                ax = dropout(ax)
+                # Compute expert_weights using the routing layer
+                logits = lora_router(x)
+                expert_weights = F.softmax(logits, dim=-1)
 
+                # Compute ax using einsum
+                ax = torch.einsum("bsd,edr->bser", x, lora_A)
+                ax = dropout(ax)
                 # Compute bax using einsum
-                output = torch.einsum('bsj,jk->bsk', ax, lora_B)
+                bax = torch.einsum("bser,erd->bsed", ax, lora_B)
+                # Combine using router probabilities
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
                 if requires_conversion:
                     output = output.to(expected_dtype)
                 result += output * scaling
 
             return result
-
 
 
 if is_bnb_4bit_available():
@@ -180,7 +146,6 @@ if is_bnb_4bit_available():
                 * self.scaling[adapter]
             )
 
-
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             result = super().forward(x)
             # As per Tim Dettmers, for 4bit, we need to defensively clone here.
@@ -211,50 +176,15 @@ if is_bnb_4bit_available():
                 expert_weights = F.softmax(logits, dim=-1)
 
                 # Compute ax using einsum
-                ax = torch.einsum('bsd,edr->bser', x, lora_A)
+                ax = torch.einsum("bsd,edr->bser", x, lora_A)
                 ax = dropout(ax)
                 # Compute bax using einsum
-                bax = torch.einsum('bser,erd->bsed', ax, lora_B)
+                bax = torch.einsum("bser,erd->bsed", ax, lora_B)
                 # Combine using router probabilities
-                output = torch.einsum('...e,...ed->...d', expert_weights, bax)
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
                 if requires_conversion:
                     output = output.to(expected_dtype)
                 result += output * scaling
 
             return result
-
-        # def forward(self, x: torch.Tensor) -> torch.Tensor:
-        #     result = super().forward(x)
-        #     # As per Tim Dettmers, for 4bit, we need to defensively clone here.
-        #     # The reason is that in some cases, an error can occur that backprop
-        #     # does not work on a manipulated view. This issue may be solved with
-        #     # newer PyTorch versions but this would need extensive testing to be
-        #     # sure.
-        #     result = result.clone()
-
-        #     active_adapter = self.active_adapters[0]
-        #     if active_adapter in self.lora_A.keys():
-        #         lora_A = self.lora_A[active_adapter]  # Shape: [in_features, r]
-        #         lora_B = self.lora_B[active_adapter]  # Shape: [r, out_features]
-        #         dropout = self.lora_dropout[active_adapter]
-        #         scaling = self.scaling[active_adapter]
-
-        #         requires_conversion = not torch.is_autocast_enabled()
-        #         if requires_conversion:
-        #             expected_dtype = result.dtype
-        #             compute_dtype = lora_A.dtype
-        #             if x.dtype != compute_dtype:
-        #                 x = x.to(compute_dtype)
-
-        #         # Compute ax using einsum
-        #         ax = torch.einsum('bsi,ij->bsj', x, lora_A)
-        #         ax = dropout(ax)
-
-        #         # Compute bax using einsum
-        #         output = torch.einsum('bsj,jk->bsk', ax, lora_B)
-        #         if requires_conversion:
-        #             output = output.to(expected_dtype)
-        #         result += output * scaling
-
-        #     return result

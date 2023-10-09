@@ -14,7 +14,7 @@
 # limitations under the License.
 import re
 import warnings
-from dataclasses import asdict, replace
+from dataclasses import asdict
 from enum import Enum
 from itertools import chain
 
@@ -26,7 +26,6 @@ from peft.tuners.tuners_utils import BaseTuner, BaseTunerLayer, check_target_mod
 from peft.utils import (
     TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING,
     ModulesToSaveWrapper,
-    _freeze_adapter,
     _get_submodules,
     get_auto_gptq_quant_linear,
     get_quantization_config,
@@ -150,6 +149,7 @@ class MoloraModel(BaseTuner):
             "lora_dropout": lora_config.lora_dropout,
             "fan_in_fan_out": lora_config.fan_in_fan_out,
             "init_lora_weights": lora_config.init_lora_weights,
+            "num_experts": lora_config.num_experts,
         }
         kwargs["loaded_in_8bit"] = optional_kwargs.pop("loaded_in_8bit", False)
         kwargs["loaded_in_4bit"] = optional_kwargs.pop("loaded_in_4bit", False)
@@ -248,7 +248,13 @@ class MoloraModel(BaseTuner):
                     "quant_type": target.weight.quant_type,
                 }
             )
-            new_module = Linear4bit(adapter_name, target.in_features, target.out_features, bias=bias, **fourbit_kwargs)
+            new_module = Linear4bit(
+                adapter_name,
+                target.in_features,
+                target.out_features,
+                bias=bias,
+                **fourbit_kwargs,
+            )
         elif AutoGPTQQuantLinear is not None and isinstance(target, AutoGPTQQuantLinear):
             new_module = QuantLinear(adapter_name, target, **kwargs)
             target.weight = target.qweight
@@ -360,194 +366,6 @@ class MoloraModel(BaseTuner):
                 setattr(parent, target_name, target.modules_to_save[target.active_adapter])
 
         return self.model
-
-    def add_weighted_adapter(
-        self,
-        adapters,
-        weights,
-        adapter_name,
-        combination_type="svd",
-        svd_rank=None,
-        svd_clamp=None,
-        svd_full_matrices=True,
-        svd_driver=None,
-    ):
-        """
-        This method adds a new adapter by merging the given adapters with the given weights.
-
-        When using the `cat` combination_type you should be aware that rank of the resulting adapter will be equal to
-        the sum of all adapters ranks. So it's possible that the mixed adapter may become too big and result in OOM
-        errors.
-
-        Args:
-            adapters (`list`):
-                List of adapter names to be merged.
-            weights (`list`):
-                List of weights for each adapter.
-            adapter_name (`str`):
-                Name of the new adapter.
-            combination_type (`str`):
-                Type of merging. Can be one of [`svd`, `linear`, `cat`]. When using the `cat` combination_type you
-                should be aware that rank of the resulting adapter will be equal to the sum of all adapters ranks. So
-                it's possible that the mixed adapter may become too big and result in OOM errors.
-            svd_rank (`int`, *optional*):
-                Rank of output adapter for svd. If None provided, will use max rank of merging adapters.
-            svd_clamp (`float`, *optional*):
-                A quantile threshold for clamping SVD decomposition output. If None is provided, do not perform
-                clamping. Defaults to None.
-            svd_full_matrices (`bool`, *optional*):
-                Controls whether to compute the full or reduced SVD, and consequently, the shape of the returned
-                tensors U and Vh. Defaults to True.
-            svd_driver (`str`, *optional*):
-                Name of the cuSOLVER method to be used. This keyword argument only works when merging on CUDA. Can be
-                one of [None, `gesvd`, `gesvdj`, `gesvda`]. For more info please refer to `torch.linalg.svd`
-                documentation. Defaults to None.
-        """
-
-        if adapter_name in list(self.peft_config.keys()):
-            return
-        for adapter in adapters:
-            if adapter not in list(self.peft_config.keys()):
-                raise ValueError(f"Adapter {adapter} does not exist")
-
-        # if there is only one adapter, we can only use linear merging
-        combination_type = "linear" if len(adapters) == 1 else combination_type
-
-        adapters_ranks = [self.peft_config[adapter].r for adapter in adapters]
-        if combination_type == "linear":
-            # all adapters ranks should be same, new rank is just this value
-            if len(set(adapters_ranks)) != 1:
-                raise ValueError("All adapters must have the same r value when using `linear` combination_type")
-            new_rank = adapters_ranks[0]
-        elif combination_type == "cat":
-            # adapters ranks may be different, new rank is sum of all ranks
-            # be careful, because output adapter rank may be really big if mixing a lot of adapters
-            new_rank = sum(adapters_ranks)
-        elif combination_type == "svd":
-            # new rank is the max of all ranks of the adapters if not provided
-            new_rank = svd_rank or max(adapters_ranks)
-        else:
-            raise ValueError(f"Invalid combination_type: {combination_type}")
-
-        target_modules_type = type(self.peft_config[adapters[0]].target_modules)
-        new_target_modules = set() if target_modules_type == list else ""
-        for adapter in adapters:
-            if type(self.peft_config[adapter].target_modules) != target_modules_type:
-                raise ValueError(
-                    "all adapter configs should follow the same target modules type. "
-                    "Combining adapters with `target_modules` type being a mix of list and string is not supported."
-                )
-            if target_modules_type == list:
-                new_target_modules |= set(self.peft_config[adapter].target_modules)
-            else:
-                new_target_modules += f"({self.peft_config[adapter].target_modules})|"
-
-        new_target_modules = list(new_target_modules) if target_modules_type == list else new_target_modules[:-1]
-
-        self.peft_config[adapter_name] = replace(
-            self.peft_config[adapters[0]],
-            r=new_rank,
-            lora_alpha=new_rank,
-            target_modules=new_target_modules,
-        )
-        self.inject_adapter(self.model, adapter_name)
-
-        # Do we really need that?
-        _freeze_adapter(self.model, adapter_name)
-
-        key_list = [key for key, _ in self.model.named_modules() if "lora" not in key]
-        for key in key_list:
-            _, target, _ = _get_submodules(self.model, key)
-            if isinstance(target, MoloraLayer):
-                if adapter_name in target.lora_A:
-                    target_lora_A = target.lora_A[adapter_name]
-                    target_lora_B = target.lora_B[adapter_name]
-                else:
-                    continue
-
-                target_lora_A.data = target_lora_A.data * 0.0
-                target_lora_B.data = target_lora_B.data * 0.0
-                if combination_type == "linear":
-                    for adapter, weight in zip(adapters, weights):
-                        if adapter in target.lora_A:
-                            current_adapter_lora_A = target.lora_A[adapter]
-                            current_adapter_lora_B = target.lora_B[adapter]
-                        else:
-                            continue
-                        target_lora_A.data += current_adapter_lora_A.data * weight * target.scaling[adapter]
-                        target_lora_B.data += current_adapter_lora_B.data
-                elif combination_type == "cat":
-                    loras_A, loras_B = [], []
-                    for adapter, weight in zip(adapters, weights):
-                        if adapter in target.lora_A:
-                            current_adapter_lora_A = target.lora_A[adapter]
-                            current_adapter_lora_B = target.lora_B[adapter]
-                        else:
-                            continue
-                        loras_A.append(current_adapter_lora_A.data * weight * target.scaling[adapter])
-                        loras_B.append(current_adapter_lora_B.data)
-
-                    if len(loras_A) == 0:
-                        raise ValueError("No matching LoRAs found. Please raise an issue on Github.")
-                    loras_A = torch.cat(loras_A, dim=0)
-                    loras_B = torch.cat(loras_B, dim=1)
-                    target_lora_A.data[: loras_A.shape[0], :] = loras_A
-                    target_lora_B.data[:, : loras_B.shape[1]] = loras_B
-                elif combination_type == "svd":
-                    target_lora_A.data, target_lora_B.data = self._svd_weighted_adapter(
-                        adapters,
-                        weights,
-                        new_rank,
-                        target,
-                        target_lora_A,
-                        target_lora_B,
-                        svd_clamp,
-                        full_matrices=svd_full_matrices,
-                        driver=svd_driver,
-                    )
-
-    def _svd_weighted_adapter(
-        self,
-        adapters,
-        weights,
-        new_rank,
-        target,
-        target_lora_A,
-        target_lora_B,
-        clamp=None,
-        full_matrices=True,
-        driver=None,
-    ):
-        valid_adapters = []
-        valid_weights = []
-        for adapter, weight in zip(adapters, weights):
-            if adapter in target.lora_A:
-                valid_adapters.append(adapter)
-                valid_weights.append(weight)
-
-        # if no valid adapter, nothing to do
-        if len(valid_adapters) == 0:
-            raise ValueError("No matching LoRAs found. Please raise an issue on Github.")
-
-        delta_weight = valid_weights[0] * target.get_delta_weight(valid_adapters[0])
-        for adapter, weight in zip(valid_adapters[1:], valid_weights[1:]):
-            delta_weight += weight * target.get_delta_weight(adapter)
-        if hasattr(target, "fan_in_fan_out") and target.fan_in_fan_out:
-            delta_weight = delta_weight.T
-
-        # based on https://github.com/kohya-ss/sd-scripts/blob/main/networks/svd_merge_lora.py#L114-L131
-        U, S, Vh = torch.linalg.svd(delta_weight, full_matrices=full_matrices, driver=driver)
-        U = U[:, :new_rank]
-        S = S[:new_rank]
-        U = U @ torch.diag(S)
-        Vh = Vh[:new_rank, :]
-        if clamp is not None:
-            dist = torch.cat([U.flatten(), Vh.flatten()])
-            hi_val = torch.quantile(dist, clamp)
-            low_val = -hi_val
-            U = U.clamp(low_val, hi_val)
-            Vh = Vh.clamp(low_val, hi_val)
-        return Vh, U
 
     def delete_adapter(self, adapter_name: str):
         """
