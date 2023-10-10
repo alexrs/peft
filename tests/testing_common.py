@@ -871,6 +871,7 @@ class PeftCommonTester:
         model = self.transformers_class.from_pretrained(model_id)
         config = config_cls(
             base_model_name_or_path=model_id,
+            init_ia3_weights=False,
             **config_kwargs,
         )
         if not isinstance(config, (LoraConfig, IA3Config)):
@@ -941,9 +942,38 @@ class PeftCommonTester:
 
         elif isinstance(config, (IA3Config)):
             model = get_peft_model(model, config, adapter_list[0])
+            model = model.to(self.torch_device)
+            dummy_input = self.prepare_inputs_for_testing()
+            output0 = model(**dummy_input)[0]
+
             model.add_adapter(adapter_list[1], config)
             model.add_adapter(adapter_list[2], config)
-            model = model.to(self.torch_device)
+
+            model.set_adapter(adapter_list)
+            output1 = model(**dummy_input)[0]
+
+            model.merge_adapter()
+            output2 = model(**dummy_input)[0]
+
+            model.unmerge_adapter()
+            output3 = model(**dummy_input)[0]
+
+            # using addition
+            model.add_weighted_adapter(adapter_list, torch.ones(3) / 3, "merged-add")
+            model.set_adapter("merged-add")
+            output4 = model(**dummy_input)[0]
+
+            # using multiplication
+            model.add_weighted_adapter_mul(adapter_list, torch.ones(3), "merged-mul")
+            model.set_adapter("merged-mul")
+            output5 = model(**dummy_input)[0]
+
+            assert not torch.allclose(output0, output1)
+            torch.testing.assert_allclose(output1, output2)
+            torch.testing.assert_allclose(output1, output3)
+            torch.testing.assert_allclose(output1, output5)
+            torch.testing.assert_allclose(output1, output4)
+            return
             # single adapter re-weighting and multi adapter linear re-weighting
             # Note: IA3 only supports linear re-weighting
             model.add_weighted_adapter([adapter_list[0]], [weight_list[0]], "single_adapter_reweighting")
