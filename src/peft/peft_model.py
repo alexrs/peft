@@ -637,15 +637,21 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             self.eval()
         return load_result
 
-    def set_adapter(self, adapter_name: str):
+    def set_adapter(self, adapter_name: str | list[str]):
         """
         Sets the active adapter.
         """
-        if adapter_name not in self.peft_config:
-            raise ValueError(f"Adapter {adapter_name} not found.")
-        self.active_adapter = adapter_name
-        if not self.peft_config[adapter_name].is_prompt_learning:
-            self.base_model.set_adapter(adapter_name)
+        # FIXME
+        adapter_names = [adapter_name] if isinstance(adapter_name, str) else adapter_name
+        for name in adapter_names:
+            if name not in self.peft_config:
+                raise ValueError(f"Adapter {name} not found.")
+
+        self.active_adapter = adapter_names
+        if any (self.peft_config[name].is_prompt_learning for name in adapter_names) and len(adapter_names) > 1:
+            raise ValueError("Cannot set multiple prompt learning adapters at the same time.")
+
+        self.base_model.set_adapter(adapter_name)
         _set_adapter(self, adapter_name)
 
     @property
@@ -654,7 +660,11 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
 
     @property
     def active_peft_config(self):
-        return self.peft_config[self.active_adapter]
+        # FIXME
+        if isinstance(self.active_adapter, str):
+            return self.peft_config[self.active_adapter]
+        # list
+        return self.peft_config[self.active_adapter[0]]
 
     def create_or_update_model_card(self, output_dir: str):
         """

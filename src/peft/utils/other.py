@@ -249,8 +249,14 @@ def _set_trainable(model, adapter_name):
 
 def _set_adapter(model, adapter_name):
     for module in model.modules():
-        if isinstance(module, ModulesToSaveWrapper):
-            module.set_adapter(adapter_name)
+        if not isinstance(module, ModulesToSaveWrapper):
+            continue
+
+        if not isinstance(adapter_name, str):  # list
+            if len(adapter_name) > 1:
+                raise ValueError("modules_to_save does not currently support multiple active adapters")
+            adapter_name = adapter_name[0]
+        module.set_adapter(adapter_name)
 
 
 def _prepare_prompt_learning_config(peft_config, model_config):

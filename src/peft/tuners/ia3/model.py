@@ -275,6 +275,7 @@ class IA3Model(BaseTuner):
                     warnings.warn("Adapter cannot be set when the model is merged. Unmerging the model first.")
                     module.unmerge()
                 module.set_adapter(adapter_name)
+        self.active_adapter = adapter_name
 
     def _prepare_adapter_config(self, peft_config, model_config):
         if peft_config.target_modules is None:
@@ -440,3 +441,51 @@ class IA3Model(BaseTuner):
                     else:
                         continue
                     target_ia3_l.data += current_adapter_ia3_l.data * weight
+
+    def add_weighted_adapter_mul(self, adapters, weights, adapter_name):
+        """
+        This method adds a new adapter by merging the given adapters with the given weights.
+
+        Args:
+            adapters (`list`):
+                List of adapter names to be merged.
+            weights (`list`):
+                List of weights for each adapter.
+            adapter_name (`str`):
+                Name of the new adapter.
+        """
+        if adapter_name in list(self.peft_config.keys()):
+            return
+        for adapter in adapters:
+            if adapter not in list(self.peft_config.keys()):
+                raise ValueError(f"Adapter {adapter} does not exist")
+
+        new_target_modules = self._new_modules(adapters, "target_modules")
+        new_feedforward_modules = self._new_modules(adapters, "feedforward_modules")
+
+        self.peft_config[adapter_name] = replace(
+            self.peft_config[adapters[0]],
+            target_modules=new_target_modules,
+            feedforward_modules=new_feedforward_modules,
+        )
+        self.inject_adapter(self.model, adapter_name)
+
+        # Do we really need that?
+        _freeze_adapter(self.model, adapter_name)
+
+        key_list = [key for key, _ in self.model.named_modules() if "ia3" not in key]
+        for key in key_list:
+            _, target, _ = _get_submodules(self.model, key)
+            if isinstance(target, IA3Layer):
+                if adapter_name in target.ia3_l:
+                    target_ia3_l = target.ia3_l[adapter_name]
+                else:
+                    continue
+
+                target_ia3_l.data = target_ia3_l.data * 0.0 + 1.0
+                for adapter, weight in zip(adapters, weights):
+                    if adapter in target.ia3_l:
+                        current_adapter_ia3_l = target.ia3_l[adapter]
+                    else:
+                        continue
+                    target_ia3_l.data *= current_adapter_ia3_l.data * weight
