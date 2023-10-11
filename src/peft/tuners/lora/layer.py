@@ -145,6 +145,7 @@ class LoraLayer(BaseTunerLayer):
 
     def reset_lora_parameters(self, adapter_name):
         if adapter_name in self.lora_A.keys():
+            raise Exception("I DON'T WANT TO RESET PARAMETERSSSS")
             # initialize A the same way as the default for nn.Linear and B to zero
             nn.init.kaiming_uniform_(self.lora_A[adapter_name].weight, a=math.sqrt(5))
             nn.init.zeros_(self.lora_B[adapter_name].weight)
