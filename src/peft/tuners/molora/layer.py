@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import math
+import warnings
 
 import torch
 import torch.nn as nn
@@ -43,6 +44,10 @@ class MoloraLayer(BaseTunerLayer):
         self.in_features = in_features
         self.out_features = out_features
         self.kwargs = kwargs
+
+    @property
+    def merged(self) -> bool:
+        return bool(self.merged_adapters)
 
     def _init_empty_weights(self, cls, *args, **kwargs) -> None:
         # A helper method that allows to initialize the layer of the given class without spending time to initialize the
@@ -142,15 +147,61 @@ class Linear(nn.Linear, MoloraLayer):
         # Freezing the pre-trained weight matrix
 
         self.fan_in_fan_out = fan_in_fan_out
+        self.num_experts = num_experts
 
         self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
         self.set_adapter(adapter_name)
 
+    def merge(self, safe_merge: bool = False) -> None:
+        """
+        Merge the active adapter weights into the base weights by averaging all the experts.
+        TODO: Should we average or just add?
+
+        Args:
+            safe_merge (`bool`, *optional*):
+                If True, the merge operation will be performed in a copy of the original weights and check for NaNs
+                before merging the weights. This is useful if you want to check if the merge operation will produce
+                NaNs. Defaults to `False`.
+        """
+        if self.merged:
+            warnings.warn(
+                f"Already following adapters were merged {','.join(self.merged_adapters)}. "
+            )
+        active_adapter = self.active_adapters[0]
+
+        if active_adapter in self.lora_A.keys():
+            for expert in range(self.num_experts):
+                if safe_merge:
+                    # Note that safe_merge will be slower than the normal merge
+                    # because of the copy operation.
+                    orig_weights = self.weight.data.clone()
+                    orig_weights += self.get_delta_weight(active_adapter, expert) / self.num_experts
+
+                    if not torch.isfinite(orig_weights).all():
+                        raise ValueError(
+                            f"NaNs detected in the merged weights. The expert {expert} seems to be broken"
+                        )
+
+                    self.weight.data = orig_weights
+                else:
+                    self.weight.data += self.get_delta_weight(active_adapter, expert) / self.num_experts
+            self.merged_adapters.append(active_adapter)
+
+
+    def unmerge(self) -> None:
+        if not self.merged:
+            warnings.warn("Already unmerged. Nothing to do.")
+            return
+        active_adapter = self.merged_adapters.pop()
+        for expert in range(self.num_experts):
+            if active_adapter in self.lora_A.keys():
+                self.weight.data -= self.get_delta_weight(active_adapter, expert) * self.num_experts
+
     # Does this makes sense?
-    def get_delta_weight(self, adapter) -> torch.Tensor:
+    def get_delta_weight(self, adapter, expert) -> torch.Tensor:
         return (
             transpose(
-                self.lora_B[adapter] @ self.lora_A[adapter],
+                self.lora_B[adapter][expert] @ self.lora_A[adapter][expert],
                 self.fan_in_fan_out,
             )
             * self.scaling[adapter]

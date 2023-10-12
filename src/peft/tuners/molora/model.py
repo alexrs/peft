@@ -19,6 +19,7 @@ from enum import Enum
 from itertools import chain
 
 import torch
+import torch.nn as nn
 from tqdm import tqdm
 
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
@@ -324,41 +325,47 @@ class MoloraModel(BaseTuner):
             peft_config.target_modules = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING[model_config["model_type"]]
         return peft_config
 
-    def _unload(self, progressbar: bool = False):
+    def _unload_and_optionally_merge(self, merge=True, progressbar: bool = False, safe_merge: bool = False):
+        if merge:
+            if getattr(self.model, "quantization_method", None) == "gptq":
+                raise ValueError("Cannot merge MoLoRA layers when the model is gptq quantized")
+
         key_list = [key for key, _ in self.model.named_modules() if "lora" not in key]
-        desc = "Unloading " + "model"
+        desc = "Unloading " + ("and merging " if merge else "") + "model"
         for key in tqdm(key_list, disable=not progressbar, desc=desc):
             try:
                 parent, target, target_name = _get_submodules(self.model, key)
             except AttributeError:
                 continue
             if isinstance(target, MoloraLayer):
-                if is_bnb_available() and isinstance(target, bnb.nn.Linear8bitLt):
-                    bias = target.bias is not None
+                if is_bnb_available() and isinstance(target, Linear8bitLt):
+                    bias = target.base_layer.bias is not None
                     new_module = bnb.nn.Linear8bitLt(
                         target.in_features,
                         target.out_features,
                         bias=bias,
-                        has_fp16_weights=target.state.has_fp16_weights,
-                        memory_efficient_backward=target.state.memory_efficient_backward,
-                        threshold=target.state.threshold,
-                        index=target.index,
-                        device=target.weight.device,
+                        has_fp16_weights=target.base_layer.state.has_fp16_weights,
+                        memory_efficient_backward=target.base_layer.state.memory_efficient_backward,
+                        threshold=target.base_layer.state.threshold,
+                        index=target.base_layer.index,
+                        device=target.base_layer.weight.device,
                     )
-                elif is_bnb_4bit_available() and isinstance(target, bnb.nn.Linear4bit):
-                    bias = target.bias is not None
+                elif is_bnb_4bit_available() and isinstance(target, Linear4bit):
+                    bias = target.base_layer.bias is not None
                     new_module = bnb.nn.Linear4bit(
                         target.in_features,
                         target.out_features,
                         bias=bias,
-                        compute_dtype=target.compute_dtype,
-                        compress_statistics=target.weight.compress_statistics,
-                        quant_type=target.weight.quant_type,
-                        device=target.weight.device,
+                        compute_dtype=target.base_layer.compute_dtype,
+                        compress_statistics=target.base_layer.weight.compress_statistics,
+                        quant_type=target.base_layer.weight.quant_type,
+                        device=target.base_layer.weight.device,
                     )
                 else:
                     bias = target.bias is not None
                     new_module = torch.nn.Linear(target.in_features, target.out_features, bias=bias)
+                if merge:
+                    target.merge(safe_merge=safe_merge)
                 self._replace_module(parent, target_name, new_module, target)
 
             # save any additional trainable modules part of `modules_to_save`
@@ -402,9 +409,36 @@ class MoloraModel(BaseTuner):
                     )
                     target.set_adapter(resetting_active_adapter)
 
+    def merge_and_unload(self, progressbar: bool = False, safe_merge: bool = False):
+        r"""
+        This method merges the MoLoRa layers into the base model. This is needed if someone wants to use the base model
+        as a standalone model.
+
+        Args:
+            progressbar (`bool`):
+                whether to show a progressbar indicating the unload and merge process
+            safe_merge (`bool`):
+                whether to activate the safe merging check to check if there is any potential Nan in the adapter
+                weights
+
+        Example:
+
+        ```py
+        >>> from transformers import AutoModelForCausalLM
+        >>> from peft import PeftModel
+
+        >>> base_model = AutoModelForCausalLM.from_pretrained("tiiuae/falcon-40b")
+        >>> peft_model_id = "smangrul/falcon-40B-int4-peft-lora-sfttrainer-sample"
+        >>> model = PeftModel.from_pretrained(base_model, peft_model_id)
+        >>> merged_model = model.merge_and_unload()
+        ```
+        """
+        return self._unload_and_optionally_merge(progressbar=progressbar, safe_merge=safe_merge)
+
     def unload(self):
         """
         Gets back the base model by removing all the lora modules without merging. This gives back the original base
         model.
         """
         return self._unload()
+
