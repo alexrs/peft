@@ -119,6 +119,18 @@ class MoloraConfig(PeftConfig):
         default=1,
         metadata={"help": "The number of experts for MoLora."},
     )
+    only_router: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to train only router for MoLora."},
+    )
+    train_single_expert: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to train only one expert for MoLora."},
+    )
+    experts_to_combine: Optional[List[str]] = field(
+        default=None,
+        metadata={"help": "The experts to combine for MoLora when they have been trained independently."},
+    )
 
     def __post_init__(self):
         self.peft_type = PeftType.MOLORA

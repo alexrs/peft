@@ -28,7 +28,7 @@ class MoloraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
     adapter_layer_names = ["lora_A", "lora_B", "lora_router"]
 
-    def __init__(self, in_features: int, out_features: int, **kwargs):
+    def __init__(self, in_features: int, out_features: int, num_experts: int, **kwargs):
         self.r = {}
         self.lora_alpha = {}
         self.scaling = {}
@@ -37,12 +37,11 @@ class MoloraLayer(BaseTunerLayer):
         self.lora_B = nn.ParameterDict({})
         self.lora_router = nn.ModuleDict({})
 
-        # Mark the weight as unmerged. In this adapter we can't merge weights back into the base model.
-        self.merged = False
         self._disable_adapters = False
         self.merged_adapters = []
         self.in_features = in_features
         self.out_features = out_features
+        self.num_experts = num_experts
         self.kwargs = kwargs
 
     @property
@@ -223,9 +222,13 @@ class Linear(nn.Linear, MoloraLayer):
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
 
-            # Compute expert_weights using the routing layer
-            logits = lora_router(x)
-            expert_weights = F.softmax(logits, dim=-1)
+            if self.num_experts > 1:
+                # Compute expert_weights using the routing layer
+                logits = lora_router(x)
+                expert_weights = F.softmax(logits, dim=-1)
+            else:
+                # initialize expert_weights to 1 as we only have one expert
+                expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
 
             # Compute ax using einsum
             ax = torch.einsum("bsd,edr->bser", x, lora_A)

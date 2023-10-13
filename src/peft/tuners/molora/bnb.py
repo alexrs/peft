@@ -85,9 +85,13 @@ if is_bnb_available():
                     if x.dtype != compute_dtype:
                         x = x.to(compute_dtype)
 
+            if self.num_experts > 1:
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
                 expert_weights = F.softmax(logits, dim=-1)
+            else:
+                # initialize expert_weights to 1 as we only have one expert
+                expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
 
                 # Compute ax using einsum
                 ax = torch.einsum("bsd,edr->bser", x, lora_A)
@@ -171,9 +175,13 @@ if is_bnb_4bit_available():
                     if x.dtype != compute_dtype:
                         x = x.to(compute_dtype)
 
+            if self.num_experts > 1:
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
                 expert_weights = F.softmax(logits, dim=-1)
+            else:
+                # initialize expert_weights to 1 as we only have one expert
+                expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
 
                 # Compute ax using einsum
                 ax = torch.einsum("bsd,edr->bser", x, lora_A)

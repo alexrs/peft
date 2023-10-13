@@ -12,11 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import re
 import warnings
+import inspect
+from typing import Any, List
 from dataclasses import asdict
 from enum import Enum
 from itertools import chain
+from accelerate import dispatch_model, infer_auto_device_map
+from accelerate.hooks import AlignDevicesHook, add_hook_to_module, remove_hook_from_submodules
+from accelerate.utils import get_balanced_memory
 
 import torch
 import torch.nn as nn
@@ -144,6 +150,19 @@ class MoloraModel(BaseTuner):
         r = lora_config.rank_pattern.get(target_name_key, lora_config.r)
         alpha = lora_config.alpha_pattern.get(target_name_key, lora_config.lora_alpha)
         bias = hasattr(target, "bias") and target.bias is not None
+
+        if lora_config.train_single_expert and lora_config.num_experts != 1:
+            warnings.warn("train_single_expert is set to True. Setting num_experts to 1.")
+            lora_config.num_experts = 1
+
+        if lora_config.experts_to_combine is not None:
+            if len(lora_config.experts_to_combine) != lora_config.num_experts:
+                warnings.warn(f"Number of experts is not equal to the number of experts to combine. Setting num_experts to {len(lora_config.experts_to_combine)}.")
+                lora_config.num_experts = len(lora_config.experts_to_combine)
+
+        if lora_config.only_router:
+            self._mark_only_router_as_trainable()
+
         kwargs = {
             "r": r,
             "lora_alpha": alpha,
@@ -151,6 +170,7 @@ class MoloraModel(BaseTuner):
             "fan_in_fan_out": lora_config.fan_in_fan_out,
             "init_lora_weights": lora_config.init_lora_weights,
             "num_experts": lora_config.num_experts,
+            "experts_to_combine": lora_config.experts_to_combine,
         }
         kwargs["loaded_in_8bit"] = optional_kwargs.pop("loaded_in_8bit", False)
         kwargs["loaded_in_4bit"] = optional_kwargs.pop("loaded_in_4bit", False)
@@ -217,6 +237,11 @@ class MoloraModel(BaseTuner):
                         m.bias.requires_grad = True
             else:
                 raise NotImplementedError(f"Requested bias: {bias}, is not implemented.")
+
+    def _mark_only_router_as_trainable(self) -> None:
+        for n, p in self.model.named_parameters():
+            if "lora_router" not in n:
+                p.requires_grad = False
 
     @staticmethod
     def _create_new_module(lora_config, adapter_name, target, **kwargs):
@@ -442,3 +467,77 @@ class MoloraModel(BaseTuner):
         """
         return self._unload()
 
+    def load_experts(self, model_id: str, adapter_name: str, expert_names: List[str], is_trainable: bool = False, **kwargs: Any):
+        from ...utils import load_peft_weights, infer_device, set_peft_model_state_dict
+        from ...peft_model import PeftModel
+
+        hf_hub_download_kwargs, kwargs = PeftModel._split_kwargs(kwargs)
+        torch_device = infer_device()
+
+        if adapter_name not in self.peft_config:
+            # load the config
+            peft_config = MoloraConfig.from_pretrained(
+                model_id,
+                **hf_hub_download_kwargs,
+            )
+            if peft_config.is_prompt_learning and is_trainable:
+                raise ValueError("Cannot set a prompt learning adapter to trainable when loading pretrained adapter.")
+            else:
+                peft_config.inference_mode = not is_trainable
+            self.add_adapter(adapter_name, peft_config)
+
+        expert_weights = []
+        for expert in expert_names:
+            expert_weights.append(load_peft_weights(os.path.join(model_id, expert), device=torch_device, **hf_hub_download_kwargs))
+
+        # construct the adapter weights
+        adapters_weights = {}
+        for k in expert_weights[0].keys():
+            adapters_weights[k] = torch.cat([expert_weights[i][k] for i in range(len(expert_weights))], dim=0)
+
+        # load the weights into the model
+        load_result = set_peft_model_state_dict(self, adapters_weights, adapter_name=adapter_name)
+        if (
+            (getattr(self, "hf_device_map", None) is not None)
+            and (len(set(self.hf_device_map.values()).intersection({"cpu", "disk"})) > 0)
+            and len(self.peft_config) == 1
+        ):
+            device_map = kwargs.get("device_map", "auto")
+            max_memory = kwargs.get("max_memory", None)
+            offload_dir = kwargs.get("offload_folder", None)
+            offload_index = kwargs.get("offload_index", None)
+
+            dispatch_model_kwargs = {}
+            # Safety checker for previous `accelerate` versions
+            # `offload_index` was introduced in https://github.com/huggingface/accelerate/pull/873/
+            if "offload_index" in inspect.signature(dispatch_model).parameters:
+                dispatch_model_kwargs["offload_index"] = offload_index
+
+            no_split_module_classes = self._no_split_modules
+
+            if device_map != "sequential":
+                max_memory = get_balanced_memory(
+                    self,
+                    max_memory=max_memory,
+                    no_split_module_classes=no_split_module_classes,
+                    low_zero=(device_map == "balanced_low_0"),
+                )
+            if isinstance(device_map, str):
+                device_map = infer_auto_device_map(
+                    self, max_memory=max_memory, no_split_module_classes=no_split_module_classes
+                )
+            dispatch_model(
+                self,
+                device_map=device_map,
+                offload_dir=offload_dir,
+                **dispatch_model_kwargs,
+            )
+            hook = AlignDevicesHook(io_same_device=True)
+            if self.peft_config[adapter_name].is_prompt_learning:
+                remove_hook_from_submodules(self.prompt_encoder)
+            add_hook_to_module(self.get_base_model(), hook)
+
+        # Set model in evaluation mode to deactivate Dropout modules by default
+        if not is_trainable:
+            self.eval()
+        return load_result
