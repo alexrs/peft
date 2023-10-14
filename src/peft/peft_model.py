@@ -677,6 +677,80 @@ class PeftModel(PushToHubMixin, torch.nn.Module):
             self.eval()
         return load_result
 
+    def load_experts(self, model_id: str, adapter_name: str, expert_names: List[str], is_trainable: bool = False, **kwargs: Any):
+        from .tuners import MoloraConfig
+        hf_hub_download_kwargs, kwargs = self._split_kwargs(kwargs)
+        torch_device = infer_device()
+
+        if adapter_name not in self.peft_config:
+            # load the config
+            peft_config = MoloraConfig.from_pretrained(
+                model_id,
+                **hf_hub_download_kwargs,
+            )
+            if peft_config.is_prompt_learning and is_trainable:
+                raise ValueError("Cannot set a prompt learning adapter to trainable when loading pretrained adapter.")
+            else:
+                peft_config.inference_mode = not is_trainable
+            self.add_adapter(adapter_name, peft_config)
+
+        expert_weights = []
+        for expert in expert_names:
+            expert_weights.append(load_peft_weights(os.path.join(model_id, expert), device=torch_device, **hf_hub_download_kwargs))
+
+        # construct the adapter weights
+        adapters_weights = {}
+        for k in expert_weights[0].keys():
+            adapters_weights[k] = torch.cat([expert_weights[i][k] for i in range(len(expert_weights))], dim=0)
+
+        # load the weights into the model
+        load_result = set_peft_model_state_dict(self, adapters_weights, adapter_name=adapter_name)
+        if (
+            (getattr(self, "hf_device_map", None) is not None)
+            and (len(set(self.hf_device_map.values()).intersection({"cpu", "disk"})) > 0)
+            and len(self.peft_config) == 1
+        ):
+            device_map = kwargs.get("device_map", "auto")
+            max_memory = kwargs.get("max_memory", None)
+            offload_dir = kwargs.get("offload_folder", None)
+            offload_index = kwargs.get("offload_index", None)
+
+            dispatch_model_kwargs = {}
+            # Safety checker for previous `accelerate` versions
+            # `offload_index` was introduced in https://github.com/huggingface/accelerate/pull/873/
+            if "offload_index" in inspect.signature(dispatch_model).parameters:
+                dispatch_model_kwargs["offload_index"] = offload_index
+
+            no_split_module_classes = self._no_split_modules
+
+            if device_map != "sequential":
+                max_memory = get_balanced_memory(
+                    self,
+                    max_memory=max_memory,
+                    no_split_module_classes=no_split_module_classes,
+                    low_zero=(device_map == "balanced_low_0"),
+                )
+            if isinstance(device_map, str):
+                device_map = infer_auto_device_map(
+                    self, max_memory=max_memory, no_split_module_classes=no_split_module_classes
+                )
+            dispatch_model(
+                self,
+                device_map=device_map,
+                offload_dir=offload_dir,
+                **dispatch_model_kwargs,
+            )
+            hook = AlignDevicesHook(io_same_device=True)
+            if self.peft_config[adapter_name].is_prompt_learning:
+                remove_hook_from_submodules(self.prompt_encoder)
+            add_hook_to_module(self.get_base_model(), hook)
+
+        # Set model in evaluation mode to deactivate Dropout modules by default
+        if not is_trainable:
+            self.eval()
+        return load_result
+
+
     def set_adapter(self, adapter_name: str):
         """
         Sets the active adapter.
