@@ -37,6 +37,7 @@ if is_bnb_available():
             lora_alpha: int = 1,
             lora_dropout: float = 0.0,
             num_experts: int = 1,
+            top_k: int = 0,
             **kwargs,
         ) -> None:
             bnb.nn.Linear8bitLt.__init__(
@@ -53,6 +54,12 @@ if is_bnb_available():
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
+
+            if top_k > 0:
+                self.top_k = top_k
+            else:
+                self.top_k = num_experts
+
             init_lora_weights = kwargs.pop("init_lora_weights", True)
             self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
             self.set_adapter(adapter_name)
@@ -89,21 +96,30 @@ if is_bnb_available():
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
                 expert_weights = F.softmax(logits, dim=-1)
+
+                # Top-k routing
+                if self.top_k < self.num_experts:
+                    _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
+                    expert_weights = torch.zeros_like(expert_weights)
+                    expert_weights.scatter_(-1, top_k_indices, 1.0)
+                    # normalize expert weights to sum to 1
+                    # TODO: Should we normalize?
+                    expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True)
             else:
                 # initialize expert_weights to 1 as we only have one expert
                 expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
 
-                # Compute ax using einsum
-                ax = torch.einsum("bsd,edr->bser", x, lora_A)
-                ax = dropout(ax)
-                # Compute bax using einsum
-                bax = torch.einsum("bser,erd->bsed", ax, lora_B)
-                # Combine using router probabilities
-                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+            # Compute ax using einsum
+            ax = torch.einsum("bsd,edr->bser", x, lora_A)
+            ax = dropout(ax)
+            # Compute bax using einsum
+            bax = torch.einsum("bser,erd->bsed", ax, lora_B)
+            # Combine using router probabilities
+            output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
-                if requires_conversion:
-                    output = output.to(expected_dtype)
-                result += output * scaling
+            if requires_conversion:
+                output = output.to(expected_dtype)
+            result += output * scaling
 
             return result
 
@@ -121,6 +137,7 @@ if is_bnb_4bit_available():
             lora_alpha: int = 1,
             lora_dropout: float = 0.0,
             num_experts: int = 1,
+            top_k: int = 0,
             **kwargs,
         ) -> None:
             bnb.nn.Linear4bit.__init__(
@@ -136,6 +153,11 @@ if is_bnb_4bit_available():
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
+
+            if top_k > 0:
+                self.top_k = top_k
+            else:
+                self.top_k = num_experts
 
             init_lora_weights = kwargs.pop("init_lora_weights", True)
             self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
@@ -179,20 +201,29 @@ if is_bnb_4bit_available():
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
                 expert_weights = F.softmax(logits, dim=-1)
+
+                # Top-k routing
+                if self.top_k < self.num_experts:
+                    _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
+                    expert_weights = torch.zeros_like(expert_weights)
+                    expert_weights.scatter_(-1, top_k_indices, 1.0)
+                    # normalize expert weights to sum to 1
+                    # TODO: Should we normalize?
+                    expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True)
             else:
                 # initialize expert_weights to 1 as we only have one expert
                 expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
 
-                # Compute ax using einsum
-                ax = torch.einsum("bsd,edr->bser", x, lora_A)
-                ax = dropout(ax)
-                # Compute bax using einsum
-                bax = torch.einsum("bser,erd->bsed", ax, lora_B)
-                # Combine using router probabilities
-                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+            # Compute ax using einsum
+            ax = torch.einsum("bsd,edr->bser", x, lora_A)
+            ax = dropout(ax)
+            # Compute bax using einsum
+            bax = torch.einsum("bser,erd->bsed", ax, lora_B)
+            # Combine using router probabilities
+            output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
-                if requires_conversion:
-                    output = output.to(expected_dtype)
-                result += output * scaling
+            if requires_conversion:
+                output = output.to(expected_dtype)
+            result += output * scaling
 
             return result

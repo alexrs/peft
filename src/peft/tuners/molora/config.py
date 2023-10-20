@@ -131,6 +131,10 @@ class MoloraConfig(PeftConfig):
         default=None,
         metadata={"help": "The experts to combine for MoLora when they have been trained independently."},
     )
+    top_k: Optional[int] = field(
+        default=0,
+        metadata={"help": "The number of experts to combine for MoLora when they have been trained independently. By default we use all experts."},
+    )
 
     def __post_init__(self):
         self.peft_type = PeftType.MOLORA

@@ -134,6 +134,7 @@ class Linear(nn.Linear, MoloraLayer):
         lora_dropout: float = 0.0,
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
         num_experts: int = 1,
+        top_k: int = 0,
         **kwargs,
     ) -> None:
         init_lora_weights = kwargs.pop("init_lora_weights", True)
@@ -148,6 +149,10 @@ class Linear(nn.Linear, MoloraLayer):
 
         self.fan_in_fan_out = fan_in_fan_out
         self.num_experts = num_experts
+        if top_k > 0:
+            self.top_k = top_k
+        else:
+            self.top_k = num_experts
 
         self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
         self.set_adapter(adapter_name)
@@ -227,6 +232,16 @@ class Linear(nn.Linear, MoloraLayer):
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
                 expert_weights = F.softmax(logits, dim=-1)
+
+                # Get top K experts and set the rest to 0
+                if self.top_k < self.num_experts:
+                    _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
+                    expert_weights = torch.zeros_like(expert_weights)
+                    expert_weights.scatter_(-1, top_k_indices, 1.0)
+
+                    # normalize expert weights to sum to 1
+                    # TODO: Should we normalize?
+                    expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True)
             else:
                 # initialize expert_weights to 1 as we only have one expert
                 expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
