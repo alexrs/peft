@@ -236,12 +236,12 @@ class Linear(nn.Linear, MoloraLayer):
                 # Get top K experts and set the rest to 0
                 if self.top_k < self.num_experts:
                     _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
-                    expert_weights = torch.zeros_like(expert_weights)
-                    expert_weights.scatter_(-1, top_k_indices, 1.0)
+                    zeros = torch.zeros_like(expert_weights)
+                    zeros.scatter_(-1, top_k_indices, expert_weights)
 
                     # normalize expert weights to sum to 1
                     # TODO: Should we normalize?
-                    expert_weights = expert_weights / expert_weights.sum(dim=-1, keepdim=True)
+                    expert_weights = zeros / zeros.sum(dim=-1, keepdim=True)
             else:
                 # initialize expert_weights to 1 as we only have one expert
                 expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
