@@ -217,8 +217,6 @@ if is_bnb_4bit_available():
                 expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
 
 
-            print("EXPERT WEIGHTS: ", expert_weights)
-
             # Compute ax using einsum
             ax = torch.einsum("bsd,edr->bser", x, lora_A)
             ax = dropout(ax)
