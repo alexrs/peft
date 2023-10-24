@@ -172,6 +172,7 @@ class MoloraModel(BaseTuner):
             "num_experts": lora_config.num_experts,
             "experts_to_combine": lora_config.experts_to_combine,
             "top_k": lora_config.top_k,
+            "top_p": lora_config.top_p,
         }
         kwargs["loaded_in_8bit"] = optional_kwargs.pop("loaded_in_8bit", False)
         kwargs["loaded_in_4bit"] = optional_kwargs.pop("loaded_in_4bit", False)
