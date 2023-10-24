@@ -38,6 +38,7 @@ if is_bnb_available():
             lora_dropout: float = 0.0,
             num_experts: int = 1,
             top_k: int = 0,
+            top_p: float = 0.0,
             **kwargs,
         ) -> None:
             bnb.nn.Linear8bitLt.__init__(
@@ -50,16 +51,10 @@ if is_bnb_available():
                 threshold=kwargs.get("threshold", 0.0),
                 index=kwargs.get("index", None),
             )
-            MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
+            MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts, top_k=top_k, top_p=top_p)
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
-
-            if top_k > 0:
-                self.top_k = top_k
-            else:
-                self.top_k = num_experts
-
             init_lora_weights = kwargs.pop("init_lora_weights", True)
             self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
             self.set_adapter(adapter_name)
@@ -95,17 +90,24 @@ if is_bnb_available():
             if self.num_experts > 1:
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
-                expert_weights = F.softmax(logits, dim=-1)
 
                 # Top-k routing
                 if self.top_k < self.num_experts:
-                    _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
-                    zeros = torch.zeros_like(expert_weights)
-                    zeros.scatter_(-1, top_k_indices, expert_weights)
+                    # _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
+                    # zeros = torch.zeros_like(expert_weights)
+                    # zeros.scatter_(-1, top_k_indices, expert_weights)
 
-                    # normalize expert weights to sum to 1
-                    # TODO: Should we normalize?
-                    expert_weights = zeros / zeros.sum(dim=-1, keepdim=True)
+                    # # normalize expert weights to sum to 1
+                    # # TODO: Should we normalize?
+                    # expert_weights = zeros / zeros.sum(dim=-1, keepdim=True)
+                    # Remove all tokens with a probability less than the last token of the top-k
+                    logits = self.top_k_routing(logits, self.top_k)
+
+                # Top-p routing
+                if self.top_p > 0.0:
+                    logits = self.top_p_routing(logits, self.top_p)
+
+                expert_weights = F.softmax(logits, dim=-1)
             else:
                 # initialize expert_weights to 1 as we only have one expert
                 expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
@@ -139,6 +141,7 @@ if is_bnb_4bit_available():
             lora_dropout: float = 0.0,
             num_experts: int = 1,
             top_k: int = 0,
+            top_p: float = 0.0,
             **kwargs,
         ) -> None:
             bnb.nn.Linear4bit.__init__(
@@ -150,15 +153,10 @@ if is_bnb_4bit_available():
                 compress_statistics=kwargs.get("compress_statistics", True),
                 quant_type=kwargs.get("quant_type", "nf4"),
             )
-            MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
+            MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts, top_k=top_k, top_p=top_p)
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
-
-            if top_k > 0:
-                self.top_k = top_k
-            else:
-                self.top_k = num_experts
 
             init_lora_weights = kwargs.pop("init_lora_weights", True)
             self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
@@ -201,17 +199,24 @@ if is_bnb_4bit_available():
             if self.num_experts > 1:
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
-                expert_weights = F.softmax(logits, dim=-1)
 
                 # Top-k routing
                 if self.top_k < self.num_experts:
-                    _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
-                    zeros = torch.zeros_like(expert_weights)
-                    zeros.scatter_(-1, top_k_indices, expert_weights)
+                    # _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
+                    # zeros = torch.zeros_like(expert_weights)
+                    # zeros.scatter_(-1, top_k_indices, expert_weights)
 
-                    # normalize expert weights to sum to 1
-                    # TODO: Should we normalize?
-                    expert_weights = zeros / zeros.sum(dim=-1, keepdim=True)
+                    # # normalize expert weights to sum to 1
+                    # # TODO: Should we normalize?
+                    # expert_weights = zeros / zeros.sum(dim=-1, keepdim=True)
+                    # Remove all tokens with a probability less than the last token of the top-k
+                    logits = self.top_k_routing(logits, self.top_k)
+
+                # Top-p routing
+                if self.top_p > 0.0:
+                    logits = self.top_p_routing(logits, self.top_p)
+
+                expert_weights = F.softmax(logits, dim=-1)
             else:
                 # initialize expert_weights to 1 as we only have one expert
                 expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)

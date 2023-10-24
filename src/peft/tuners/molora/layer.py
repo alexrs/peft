@@ -28,7 +28,7 @@ class MoloraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
     adapter_layer_names = ["lora_A", "lora_B", "lora_router"]
 
-    def __init__(self, in_features: int, out_features: int, num_experts: int, **kwargs):
+    def __init__(self, in_features: int, out_features: int, num_experts: int, top_k: float, top_p: float, **kwargs):
         self.r = {}
         self.lora_alpha = {}
         self.scaling = {}
@@ -42,6 +42,11 @@ class MoloraLayer(BaseTunerLayer):
         self.in_features = in_features
         self.out_features = out_features
         self.num_experts = num_experts
+        if top_k > 0:
+            self.top_k = top_k
+        else:
+            self.top_k = num_experts
+        self.top_p = top_p
         self.kwargs = kwargs
 
     @property
@@ -113,6 +118,26 @@ class MoloraLayer(BaseTunerLayer):
             r = self.r[active_adapter]
             self.scaling[active_adapter] = alpha / r
 
+    def top_p_routing(self, logits, top_p = 1.0):
+        # From: https://github.com/lucidrains/DALLE-pytorch/issues/318
+        # Look at https://gist.github.com/thomwolf/1a5a29f6962089e871b94cbd09daf317 as well
+        sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+        cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > top_p
+        # Shift the indices to the right to keep also the first token above the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+        # scatter sorted tensors to original indexing
+        indices_to_remove = sorted_indices_to_remove.scatter(dim=-1, index=sorted_indices, src=sorted_indices_to_remove)
+        logits[indices_to_remove] = float('-inf')
+        return logits
+
+    def top_k_routing(self, logits, top_k):
+        indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
+        logits[indices_to_remove] = float('-inf')
+        return logits
+
 
 # Below code is based on https://github.com/microsoft/LoRA/blob/main/loralib/layers.py
 # and modified to work with PyTorch FSDP
@@ -135,6 +160,7 @@ class Linear(nn.Linear, MoloraLayer):
         fan_in_fan_out: bool = False,  # Set this to True if the layer to replace stores weight like (fan_in, fan_out)
         num_experts: int = 1,
         top_k: int = 0,
+        top_p: float = 0.0,
         **kwargs,
     ) -> None:
         init_lora_weights = kwargs.pop("init_lora_weights", True)
@@ -144,16 +170,10 @@ class Linear(nn.Linear, MoloraLayer):
         # Note that we don't use self._init_empty_weights() for Linear because it is a bit slower and the benefit of
         # added robustness is not big enough for Linear.
 
-        MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts)
+        MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts, top_k=top_k, top_p=top_p, **kwargs)
         # Freezing the pre-trained weight matrix
 
         self.fan_in_fan_out = fan_in_fan_out
-        self.num_experts = num_experts
-        if top_k > 0:
-            self.top_k = top_k
-        else:
-            self.top_k = num_experts
-
         self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
         self.set_adapter(adapter_name)
 
@@ -231,17 +251,24 @@ class Linear(nn.Linear, MoloraLayer):
             if self.num_experts > 1:
                 # Compute expert_weights using the routing layer
                 logits = lora_router(x)
-                expert_weights = F.softmax(logits, dim=-1)
 
-                # Get top K experts and set the rest to 0
+                # Top-k routing
                 if self.top_k < self.num_experts:
-                    _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
-                    zeros = torch.zeros_like(expert_weights)
-                    zeros.scatter_(-1, top_k_indices, expert_weights)
+                    # _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
+                    # zeros = torch.zeros_like(expert_weights)
+                    # zeros.scatter_(-1, top_k_indices, expert_weights)
 
-                    # normalize expert weights to sum to 1
-                    # TODO: Should we normalize?
-                    expert_weights = zeros / zeros.sum(dim=-1, keepdim=True)
+                    # # normalize expert weights to sum to 1
+                    # # TODO: Should we normalize?
+                    # expert_weights = zeros / zeros.sum(dim=-1, keepdim=True)
+                    # Remove all tokens with a probability less than the last token of the top-k
+                    logits = self.top_k_routing(logits, self.top_k)
+
+                # Top-p routing
+                if self.top_p > 0.0:
+                    logits = self.top_p_routing(logits, self.top_p)
+
+                expert_weights = F.softmax(logits, dim=-1)
             else:
                 # initialize expert_weights to 1 as we only have one expert
                 expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
