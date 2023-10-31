@@ -39,8 +39,14 @@ class SelfAttentionRouter(nn.Module):
         keys = self.key(bax)
         values = self.value(x)
 
+        print(f"queries: {queries.shape}")
+        print(f"keys: {keys.shape}")
+        print(f"values: {values.shape}")
+
         scores = torch.matmul(queries.unsqueeze(2), keys.transpose(-1, -2)) / (self.hidden_dim ** 0.5)
         attention = self.softmax(scores)
+        print(f"scores: {scores.shape}")
+        print(f"attention: {attention.shape}")
         # weighted = torch.matmul(attention, values.unsqueeze(-2))
 
         # Ensure attention scores and values have the correct dimensions
