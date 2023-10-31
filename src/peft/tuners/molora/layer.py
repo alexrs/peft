@@ -25,18 +25,24 @@ from peft.utils.other import transpose
 
 
 class SelfAttentionRouter(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 32):
         super().__init__()
         self.input_dim = input_dim
-        self.query = nn.Linear(input_dim, input_dim)
-        self.key = nn.Linear(input_dim, input_dim)
+        self.hidden_dim = hidden_dim
+        self.query = nn.Linear(input_dim, hidden_dim)
+        self.key = nn.Linear(input_dim, hidden_dim)
         self.value = nn.Linear(input_dim, output_dim)
-        self.softmax = nn.Softmax(dim=2)
+        self.softmax = nn.Softmax(dim=-1)
+
     def forward(self, x, bax):
         queries = self.query(x)
         keys = self.key(bax)
         values = self.value(x)
-        scores = torch.bmm(queries, keys.transpose(1, 2)) / (self.input_dim ** 0.5)
+
+        print("Shapes: x, bax", x.shape, bax.shape)
+        print("Shapes: q, k, v", queries.shape, keys.shape, values.shape)
+
+        scores = torch.bmm(queries, keys.transpose(1, 2)) / (self.hidden_dim ** 0.5)
         attention = self.softmax(scores)
         weighted = torch.bmm(attention, values)
         return weighted
