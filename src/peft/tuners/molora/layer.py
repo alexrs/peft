@@ -33,17 +33,21 @@ class SelfAttentionRouter(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, bax):
-        queries = self.query(x) # (batch_size, seq_len, 1, output_dim)
+        # x is expected to be of shape (batch_size, seq_len, input_dim)
+        # bax is expected to be of shape (batch_size, seq_len, num_experts, input_dim)
+        queries = self.query(x)  # (batch_size, seq_len, output_dim)
         keys = self.key(bax)  # (batch_size, seq_len, num_experts, output_dim)
 
-        queries = queries.unsqueeze(2)
-        scores = torch.einsum('bqod,bseod->bseo', queries, keys) / (self.input_dim ** 0.5)
+        # Add an extra dimension to queries to make it compatible with keys for batch matrix multiplication
+        queries = queries.unsqueeze(2)  # (batch_size, seq_len, 1, output_dim)
+
+        # Compute attention scores
+        scores = torch.einsum('bsod,bsekd->bsek', queries, keys) / (self.input_dim ** 0.5)
+
         attention = self.softmax(scores)  # (batch_size, seq_len, 1, num_experts)
 
-        # Squeeze the singleton dimension to get expert_weights
-        expert_weights = attention.squeeze(2)
+        return attention.squeeze(2)  # (batch_size, seq_len, num_experts)
 
-        return expert_weights
 
 
 # class SelfAttentionRouter(nn.Module):
