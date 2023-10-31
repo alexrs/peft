@@ -24,11 +24,29 @@ from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils.other import transpose
 
 
+class SelfAttentionRouter(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int):
+        super().__init__()
+        self.input_dim = input_dim
+        self.query = nn.Linear(input_dim, input_dim)
+        self.key = nn.Linear(input_dim, input_dim)
+        self.value = nn.Linear(input_dim, output_dim)
+        self.softmax = nn.Softmax(dim=2)
+    def forward(self, x, bax):
+        queries = self.query(x)
+        keys = self.key(bax)
+        values = self.value(x)
+        scores = torch.bmm(queries, keys.transpose(1, 2)) / (self.input_dim ** 0.5)
+        attention = self.softmax(scores)
+        weighted = torch.bmm(attention, values)
+        return weighted
+
+
 class MoloraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
     adapter_layer_names = ["lora_A", "lora_B", "lora_router"]
 
-    def __init__(self, in_features: int, out_features: int, num_experts: int, top_k: float, top_p: float, **kwargs):
+    def __init__(self, in_features: int, out_features: int, num_experts: int, top_k: float, top_p: float, self_attn_router: bool, **kwargs):
         self.r = {}
         self.lora_alpha = {}
         self.scaling = {}
@@ -42,6 +60,7 @@ class MoloraLayer(BaseTunerLayer):
         self.in_features = in_features
         self.out_features = out_features
         self.num_experts = num_experts
+        self.self_attn_router = self_attn_router
         if top_k > 0:
             self.top_k = top_k
         else:
@@ -65,7 +84,7 @@ class MoloraLayer(BaseTunerLayer):
         cls.__init__(self, *args, device="meta", **kwargs)
         self.to_empty(device=final_device)
 
-    def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts):
+    def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
         self.r[adapter_name] = r
@@ -80,10 +99,13 @@ class MoloraLayer(BaseTunerLayer):
         if r > 0:
             self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
             self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
-            self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
+            if self_attn_router:
+                self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, num_experts)
+            else:
+                self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
-            self.reset_lora_parameters(adapter_name)
+            self.reset_lora_parameters(adapter_name, self_attn_router)
 
         weight = getattr(self, "weight", None)
         if weight is not None:
@@ -94,16 +116,21 @@ class MoloraLayer(BaseTunerLayer):
                 self.to(weight.device)
         self.set_adapter(self.active_adapters)
 
-    def reset_lora_parameters(self, adapter_name):
+
+    def reset_lora_parameters(self, adapter_name, self_attn_router=False):
         if adapter_name in self.lora_A.keys():
             # initialize each expert using kaiming_uniform_
             for i in range(self.lora_A[adapter_name].shape[0]):
                 # initialize A the same way as the default for nn.Linear and B to zero
                 nn.init.kaiming_uniform_(self.lora_A[adapter_name][i], a=math.sqrt(5))
                 nn.init.zeros_(self.lora_B[adapter_name][i])
-                nn.init.kaiming_uniform_(self.lora_router[adapter_name].weight, a=math.sqrt(5))
-            # nn.init.kaiming_uniform_(self.lora_A[adapter_name], a=math.sqrt(5))
-            # nn.init.zeros_(self.lora_B[adapter_name])
+                if self_attn_router:
+                    nn.init.kaiming_uniform_(self.lora_router[adapter_name].query.weight, a=math.sqrt(5))
+                    nn.init.kaiming_uniform_(self.lora_router[adapter_name].key.weight, a=math.sqrt(5))
+                    nn.init.kaiming_uniform_(self.lora_router[adapter_name].value.weight, a=math.sqrt(5))
+                else:
+                    nn.init.kaiming_uniform_(self.lora_router[adapter_name].weight, a=math.sqrt(5))
+
 
     def scale_layer(self, scale_factor: float) -> None:
         if scale_factor != 1:
@@ -112,11 +139,13 @@ class MoloraLayer(BaseTunerLayer):
                 r = self.r[active_adapter]
                 self.scaling[active_adapter] = (alpha / r) * scale_factor
 
+
     def unscale_layer(self) -> None:
         for active_adapter in self.active_adapters:
             alpha = self.lora_alpha[active_adapter]
             r = self.r[active_adapter]
             self.scaling[active_adapter] = alpha / r
+
 
     def top_p_routing(self, logits, top_p = 1.0):
         # From: https://github.com/lucidrains/DALLE-pytorch/issues/318
@@ -132,6 +161,7 @@ class MoloraLayer(BaseTunerLayer):
         indices_to_remove = sorted_indices_to_remove.scatter(dim=-1, index=sorted_indices, src=sorted_indices_to_remove)
         logits[indices_to_remove] = float('-inf')
         return logits
+
 
     def top_k_routing(self, logits, top_k):
         indices_to_remove = logits < torch.topk(logits, top_k)[0][..., -1, None]
@@ -161,6 +191,7 @@ class Linear(nn.Linear, MoloraLayer):
         num_experts: int = 1,
         top_k: int = 0,
         top_p: float = 0.0,
+        self_attn_router: bool = False,
         **kwargs,
     ) -> None:
         init_lora_weights = kwargs.pop("init_lora_weights", True)
@@ -170,7 +201,7 @@ class Linear(nn.Linear, MoloraLayer):
         # Note that we don't use self._init_empty_weights() for Linear because it is a bit slower and the benefit of
         # added robustness is not big enough for Linear.
 
-        MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts, top_k=top_k, top_p=top_p, **kwargs)
+        MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts, top_k=top_k, top_p=top_p, self_attn_router=self_attn_router, **kwargs)
         # Freezing the pre-trained weight matrix
 
         self.fan_in_fan_out = fan_in_fan_out
@@ -248,36 +279,32 @@ class Linear(nn.Linear, MoloraLayer):
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
 
-            if self.num_experts > 1:
-                # Compute expert_weights using the routing layer
-                logits = lora_router(x)
-
-                # Top-k routing
-                if self.top_k < self.num_experts:
-                    # _, top_k_indices = torch.topk(expert_weights, self.top_k, dim=-1)
-                    # zeros = torch.zeros_like(expert_weights)
-                    # zeros.scatter_(-1, top_k_indices, expert_weights)
-
-                    # # normalize expert weights to sum to 1
-                    # # TODO: Should we normalize?
-                    # expert_weights = zeros / zeros.sum(dim=-1, keepdim=True)
-                    # Remove all tokens with a probability less than the last token of the top-k
-                    logits = self.top_k_routing(logits, self.top_k)
-
-                # Top-p routing
-                if self.top_p > 0.0:
-                    logits = self.top_p_routing(logits, self.top_p)
-
-                expert_weights = F.softmax(logits, dim=-1)
-            else:
-                # initialize expert_weights to 1 as we only have one expert
-                expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
-
             # Compute ax using einsum
             ax = torch.einsum("bsd,edr->bser", x, lora_A)
             ax = dropout(ax)
             # Compute bax using einsum
             bax = torch.einsum("bser,erd->bsed", ax, lora_B)
+
+            if self.self_attn_router:
+                expert_weights = lora_router(x, bax)
+            else:
+                if self.num_experts > 1:
+                    # Compute expert_weights using the routing layer
+                    logits = lora_router(x)
+
+                    # Top-k routing
+                    if self.top_k < self.num_experts:
+                        logits = self.top_k_routing(logits, self.top_k)
+
+                    # Top-p routing
+                    if self.top_p > 0.0:
+                        logits = self.top_p_routing(logits, self.top_p)
+
+                    expert_weights = F.softmax(logits, dim=-1)
+                else:
+                    # initialize expert_weights to 1 as we only have one expert
+                    expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
+
             # Combine using router probabilities
             output = torch.einsum("...e,...ed->...d", expert_weights, bax) * scaling
 

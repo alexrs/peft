@@ -173,6 +173,7 @@ class MoloraModel(BaseTuner):
             "experts_to_combine": lora_config.experts_to_combine,
             "top_k": lora_config.top_k,
             "top_p": lora_config.top_p,
+            "self_attn_router": lora_config.self_attn_router,
         }
         kwargs["loaded_in_8bit"] = optional_kwargs.pop("loaded_in_8bit", False)
         kwargs["loaded_in_4bit"] = optional_kwargs.pop("loaded_in_4bit", False)
@@ -191,6 +192,7 @@ class MoloraModel(BaseTuner):
                 lora_config.lora_dropout,
                 lora_config.init_lora_weights,
                 lora_config.num_experts,
+                lora_config.self_attn_router,
             )
         else:
             new_module = self._create_new_module(lora_config, adapter_name, target, **kwargs)

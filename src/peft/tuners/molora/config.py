@@ -139,6 +139,10 @@ class MoloraConfig(PeftConfig):
         default=0.0,
         metadata={"help": "The top_p rate of experts to combine for MoLora when they have been trained independently. By default we use all experts."},
     )
+    self_attn_router: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to use self attention router for MoLora."},
+    )
 
     def __post_init__(self):
         self.peft_type = PeftType.MOLORA
