@@ -24,28 +24,53 @@ from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils.other import transpose
 
 
+import torch
+import torch.nn as nn
+
 class SelfAttentionRouter(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 32):
+    def __init__(self, input_dim: int, output_dim: int):
         super().__init__()
         self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
-        self.query = nn.Linear(input_dim, hidden_dim)
-        self.key = nn.Linear(input_dim, hidden_dim)
-        self.value = nn.Linear(input_dim, output_dim)
+        self.query = nn.Linear(input_dim, output_dim)
+        self.key = nn.Linear(input_dim, output_dim)
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, bax):
-        queries = self.query(x)
-        keys = self.key(bax)
-        values = self.value(x)
+        queries = self.query(x).unsqueeze(2)  # (batch_size, seq_len, 1, output_dim)
+        keys = self.key(bax)  # (batch_size, seq_len, num_experts, output_dim)
 
-        print("Shapes: x, bax", x.shape, bax.shape)
-        print("Shapes: q, k, v", queries.shape, keys.shape, values.shape)
+        scores = torch.einsum('bqod,beod->bqoe', queries, keys) / (self.input_dim ** 0.5)
+        attention = self.softmax(scores)  # (batch_size, seq_len, 1, num_experts)
 
-        scores = torch.bmm(queries, keys.transpose(1, 2)) / (self.hidden_dim ** 0.5)
-        attention = self.softmax(scores)
-        weighted = torch.bmm(attention, values)
-        return weighted
+        # Squeeze the singleton dimension to get expert_weights
+        expert_weights = attention.squeeze(2)  # (batch_size, seq_len, num_experts)
+
+        return expert_weights
+
+
+
+# class SelfAttentionRouter(nn.Module):
+#     def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 32):
+#         super().__init__()
+#         self.input_dim = input_dim
+#         self.hidden_dim = hidden_dim
+#         self.query = nn.Linear(input_dim, hidden_dim)
+#         self.key = nn.Linear(input_dim, hidden_dim)
+#         self.value = nn.Linear(input_dim, output_dim)
+#         self.softmax = nn.Softmax(dim=-1)
+
+#     def forward(self, x, bax):
+#         queries = self.query(x)
+#         keys = self.key(bax)
+#         values = self.value(x)
+
+#         print("Shapes: x, bax", x.shape, bax.shape)
+#         print("Shapes: q, k, v", queries.shape, keys.shape, values.shape)
+
+#         scores = torch.bmm(queries, keys.transpose(1, 2)) / (self.hidden_dim ** 0.5)
+#         attention = self.softmax(scores)
+#         weighted = torch.bmm(attention, values)
+#         return weighted
 
 
 class MoloraLayer(BaseTunerLayer):
@@ -133,7 +158,7 @@ class MoloraLayer(BaseTunerLayer):
                 if self_attn_router:
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].query.weight, a=math.sqrt(5))
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].key.weight, a=math.sqrt(5))
-                    nn.init.kaiming_uniform_(self.lora_router[adapter_name].value.weight, a=math.sqrt(5))
+                    # nn.init.kaiming_uniform_(self.lora_router[adapter_name].value.weight, a=math.sqrt(5))
                 else:
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].weight, a=math.sqrt(5))
 
