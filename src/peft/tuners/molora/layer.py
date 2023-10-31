@@ -53,11 +53,11 @@ from peft.utils.other import transpose
 
 
 class SelfAttentionRouter(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 8):
+    def __init__(self, input_dim: int, bax_dim: int, output_dim: int, hidden_dim: int = 8):
         super().__init__()
         self.query = nn.Linear(input_dim, hidden_dim)
-        self.key = nn.Linear(input_dim, hidden_dim)
-        self.value = nn.Linear(input_dim, output_dim)
+        self.key = nn.Linear(bax_dim, hidden_dim)
+        self.value = nn.Linear(bax_dim, output_dim)
         self.hidden_dim = hidden_dim
         self.scale = 1.0 / (self.hidden_dim ** 0.5)
 
@@ -79,47 +79,6 @@ class SelfAttentionRouter(nn.Module):
         weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
 
         return weighted
-
-
-
-# class SelfAttentionRouter(nn.Module):
-#     def __init__(self, input_dim, num_experts):
-#         super(SelfAttentionRouter, self).__init__()
-#         self.input_dim = input_dim
-#         self.num_experts = num_experts
-
-#         # Define linear layers for query for x
-#         self.query = nn.Linear(input_dim, num_experts)
-
-#         # Define linear layers for key and value for bax
-#         self.key = nn.Linear(input_dim, num_experts)
-#         self.value = nn.Linear(input_dim, num_experts)
-
-#     def forward(self, x, bax):
-#         # Compute query for x
-#         qx = self.query(x)  # Shape: (batch_size, seq_len_x, num_experts)
-
-#         # Compute key and value for bax
-#         kbax = self.key(bax)  # Shape: (batch_size, seq_len_x, num_experts, num_experts)
-#         vbax = self.value(bax)  # Shape: (batch_size, seq_len_x, num_experts, num_experts)
-
-#         # Reshape and transpose for batched matrix multiplication
-#         qx = qx.unsqueeze(2)  # Shape: (batch_size, seq_len_x, 1, num_experts)
-#         kbax = kbax.transpose(-2, -3)  # Shape: (batch_size, seq_len_x, num_experts, num_experts)
-
-#         # Calculate attention scores
-#         attention_scores = torch.matmul(qx, kbax) / (self.num_experts ** 0.5)  # Shape: (batch_size, seq_len_x, 1, num_experts)
-
-#         # Normalize attention scores
-#         attention_probs = F.softmax(attention_scores, dim=-1)
-
-#         # Compute weighted sum of values
-#         expert_weights = torch.einsum('bsie,bsej->bsij', attention_probs, vbax)  # Shape: (batch_size, seq_len_x, 1, num_experts)
-
-#         # Squeeze to remove the singleton dimension
-#         expert_weights = expert_weights.squeeze(-2)
-
-#         return expert_weights
 
 
 
@@ -181,7 +140,7 @@ class MoloraLayer(BaseTunerLayer):
             self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
             self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
             if self_attn_router:
-                self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, num_experts)
+                self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features, num_experts)
             else:
                 self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
             self.scaling[adapter_name] = lora_alpha / r
