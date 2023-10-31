@@ -24,41 +24,62 @@ from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils.other import transpose
 
 
+# class SelfAttentionRouter(nn.Module):
+#     def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 32):
+#         super().__init__()
+#         self.query = nn.Linear(input_dim, hidden_dim)
+#         self.key = nn.Linear(input_dim, hidden_dim)
+#         self.value = nn.Linear(input_dim, output_dim)
+#         self.softmax = nn.Softmax(dim=-1)
+#         self.hidden_dim = hidden_dim
+
+#     def forward(self, x, bax):
+#         # x: [batch_size, seq_len, input_dim]
+#         # bax: [batch_size, seq_len, num_experts, input_dim]
+#         queries = self.query(x)  # [batch_size, seq_len, hidden_dim]
+#         keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
+#         values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
+
+#         queries = queries.unsqueeze(2)  # [batch_size, seq_len, 1, hidden_dim]
+#         keys = keys.transpose(-2, -1)  # [batch_size, seq_len, hidden_dim, num_experts]
+
+#         scores = torch.matmul(queries, keys) / (self.hidden_dim ** 0.5)  # [batch_size, seq_len, 1, num_experts]
+#         attention = self.softmax(scores)  # [batch_size, seq_len, 1, num_experts]
+
+#         weighted = torch.matmul(attention, values)  # [batch_size, seq_len, 1, output_dim]
+#         weighted = weighted.squeeze(2)  # [batch_size, seq_len, output_dim]
+
+#         return weighted
+
+
 class SelfAttentionRouter(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 32):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 8):
         super().__init__()
-        self.input_dim = input_dim
-        self.hidden_dim = hidden_dim
         self.query = nn.Linear(input_dim, hidden_dim)
         self.key = nn.Linear(input_dim, hidden_dim)
         self.value = nn.Linear(input_dim, output_dim)
-        self.softmax = nn.Softmax(dim=-1)
+        self.hidden_dim = hidden_dim
+        self.scale = 1.0 / (self.hidden_dim ** 0.5)
 
     def forward(self, x, bax):
-        queries = self.query(x)
-        keys = self.key(bax)
-        values = self.value(x)
+        # x: [batch_size, seq_len, input_dim]
+        # bax: [batch_size, seq_len, num_experts, input_dim]
+        queries = self.query(x)  # [batch_size, seq_len, hidden_dim]
+        keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
+        values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
 
-        print(f"queries: {queries.shape}")
-        print(f"keys: {keys.shape}")
-        print(f"values: {values.shape}")
+        # Transpose for attention computation
+        keys_transposed = keys.transpose(-2, -1)  # [batch_size, seq_len, hidden_dim, num_experts]
 
-        scores = torch.matmul(queries.unsqueeze(2), keys.transpose(-1, -2)) / (self.hidden_dim ** 0.5)
-        attention = self.softmax(scores)
-        print(f"scores: {scores.shape}")
-        print(f"attention: {attention.shape}")
-        # weighted = torch.matmul(attention, values.unsqueeze(-2))
+        # Compute scaled dot product attention
+        scores = torch.einsum('bsh,bshn->bsn', queries, keys_transposed) * self.scale
+        attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
 
-        # Ensure attention scores and values have the correct dimensions
-        attention = attention.squeeze(-2)  # Change shape to (batch_size, seq_len, seq_len)
-        values = values.transpose(1, 2)  # Change shape to (batch_size, output_dim, seq_len)
+        # Apply attention scores to values
+        weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
 
-        # Perform batch matrix multiplication
-        weighted = torch.bmm(attention, values)  # Resulting shape: (batch_size, seq_len, output_dim)
-
-        print(weighted.shape)
-        print(weighted)
         return weighted
+
 
 
 # class SelfAttentionRouter(nn.Module):
