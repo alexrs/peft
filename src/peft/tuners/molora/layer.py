@@ -24,9 +24,6 @@ from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils.other import transpose
 
 
-import torch
-import torch.nn as nn
-
 class SelfAttentionRouter(nn.Module):
     def __init__(self, input_dim: int, output_dim: int):
         super().__init__()
@@ -36,17 +33,17 @@ class SelfAttentionRouter(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x, bax):
-        queries = self.query(x).unsqueeze(2)  # (batch_size, seq_len, 1, output_dim)
+        queries = self.query(x) # (batch_size, seq_len, 1, output_dim)
         keys = self.key(bax)  # (batch_size, seq_len, num_experts, output_dim)
 
-        scores = torch.einsum('bqod,beod->bqoe', queries, keys) / (self.input_dim ** 0.5)
+        queries = queries.unsqueeze(2)
+        scores = torch.einsum('bqod,bseod->bseo', queries, keys) / (self.input_dim ** 0.5)
         attention = self.softmax(scores)  # (batch_size, seq_len, 1, num_experts)
 
         # Squeeze the singleton dimension to get expert_weights
-        expert_weights = attention.squeeze(2)  # (batch_size, seq_len, num_experts)
+        expert_weights = attention.squeeze(2)
 
         return expert_weights
-
 
 
 # class SelfAttentionRouter(nn.Module):
@@ -337,8 +334,7 @@ class Linear(nn.Linear, MoloraLayer):
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
 
             # Combine using router probabilities
-            # output = torch.einsum("...e,...ed->...d", expert_weights, bax) * scaling
-            output = torch.einsum("bse,bseo->bso", expert_weights, bax)
+            output = torch.einsum("...e,...ed->...d", expert_weights, bax) * scaling
 
             result += output
 

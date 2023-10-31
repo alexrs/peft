@@ -116,8 +116,7 @@ if is_bnb_available():
 
 
             # Combine using router probabilities
-            # output = torch.einsum("...e,...ed->...d", expert_weights, bax)
-            output = torch.einsum("bse,bseo->bso", expert_weights, bax)
+            output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             if requires_conversion:
                 output = output.to(expected_dtype)
@@ -223,8 +222,7 @@ if is_bnb_4bit_available():
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
 
             # Combine using router probabilities
-            # output = torch.einsum("...e,...ed->...d", expert_weights, bax)
-            output = torch.einsum("bse,bseo->bso", expert_weights, bax)
+            output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             if requires_conversion:
                 output = output.to(expected_dtype)
