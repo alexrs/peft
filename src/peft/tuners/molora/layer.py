@@ -87,7 +87,7 @@ class SelfAttentionRouter(nn.Module):
         super().__init__()
         self.query = nn.Linear(input_dim, hidden_dim)
         self.key = nn.Linear(output_dim, hidden_dim)
-        self.value = nn.Linear(output_dim, output_dim)
+        # self.value = nn.Linear(output_dim, output_dim)
         self.hidden_dim = hidden_dim
         self.scale = 1.0 / (self.hidden_dim ** 0.5)
 
@@ -96,7 +96,7 @@ class SelfAttentionRouter(nn.Module):
         # bax: [batch_size, seq_len, num_experts, output_dim]
         queries = self.query(x)  # [batch_size, seq_len, hidden_dim]
         keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
-        values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
+        # values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
 
         # Transpose for attention computation
         keys_transposed = keys.transpose(-2, -1)  # [batch_size, seq_len, hidden_dim, num_experts]
@@ -106,7 +106,8 @@ class SelfAttentionRouter(nn.Module):
         attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
 
         # Apply attention scores to values
-        weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
+        # weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
+        weighted = torch.einsum('bsn,bsne->bse', attention, bax)  # [batch_size, seq_len, output_dim]
 
         return weighted
 
@@ -224,7 +225,7 @@ class MoloraLayer(BaseTunerLayer):
                 if self_attn_router:
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].query.weight, a=math.sqrt(5))
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].key.weight, a=math.sqrt(5))
-                    nn.init.kaiming_uniform_(self.lora_router[adapter_name].value.weight, a=math.sqrt(5))
+                    # nn.init.kaiming_uniform_(self.lora_router[adapter_name].value.weight, a=math.sqrt(5))
                 else:
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].weight, a=math.sqrt(5))
 
