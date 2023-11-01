@@ -245,7 +245,7 @@ class Linear(nn.Linear, MoloraLayer):
         # Freezing the pre-trained weight matrix
 
         self.fan_in_fan_out = fan_in_fan_out
-        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts)
+        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router)
         self.set_adapter(adapter_name)
 
     def merge(self, safe_merge: bool = False) -> None:
