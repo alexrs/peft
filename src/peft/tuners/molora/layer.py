@@ -53,11 +53,11 @@ from peft.utils.other import transpose
 
 
 class SelfAttentionRouter(nn.Module):
-    def __init__(self, input_dim: int, bax_dim: int, output_dim: int, hidden_dim: int = 8):
+    def __init__(self, input_dim: int, bax_dim: int, hidden_dim: int = 8):
         super().__init__()
         self.query = nn.Linear(input_dim, hidden_dim)
         self.key = nn.Linear(bax_dim, hidden_dim)
-        self.value = nn.Linear(bax_dim, output_dim)
+        self.value = nn.Linear(bax_dim, hidden_dim)
         self.hidden_dim = hidden_dim
         self.scale = 1.0 / (self.hidden_dim ** 0.5)
 
@@ -76,7 +76,7 @@ class SelfAttentionRouter(nn.Module):
         attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
 
         # Apply attention scores to values
-        weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
+        weighted = torch.einsum('bsn,bsne->bse', attention, values)
 
         return weighted
 
@@ -140,7 +140,7 @@ class MoloraLayer(BaseTunerLayer):
             self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
             self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
             if self_attn_router:
-                self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features, num_experts)
+                self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features)
             else:
                 self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
             self.scaling[adapter_name] = lora_alpha / r
