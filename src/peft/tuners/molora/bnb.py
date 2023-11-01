@@ -226,7 +226,6 @@ if is_bnb_4bit_available():
 
             print("output", output.shape)
             print("result", result.shape)
-            print("scaling", scaling.shape)
             result += output * scaling
 
             return result

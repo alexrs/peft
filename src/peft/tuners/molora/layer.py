@@ -87,7 +87,7 @@ class SelfAttentionRouter(nn.Module):
         super().__init__()
         self.query = nn.Linear(input_dim, hidden_dim)
         self.key = nn.Linear(output_dim, hidden_dim)
-        self.value = nn.Linear(output_dim, hidden_dim)
+        self.value = nn.Linear(hidden_dim, output_dim)
         self.hidden_dim = hidden_dim
         self.scale = 1.0 / (self.hidden_dim ** 0.5)
 
