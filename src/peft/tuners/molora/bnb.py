@@ -223,6 +223,10 @@ if is_bnb_4bit_available():
 
             if requires_conversion:
                 output = output.to(expected_dtype)
+
+            print("output", output.shape)
+            print("result", result.shape)
+            print("scaling", scaling.shape)
             result += output * scaling
 
             return result
