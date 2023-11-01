@@ -87,13 +87,13 @@ class SelfAttentionRouter(nn.Module):
         super().__init__()
         self.query = nn.Linear(input_dim, hidden_dim)
         self.key = nn.Linear(output_dim, hidden_dim)
-        self.value = nn.Linear(hidden_dim, output_dim)
+        self.value = nn.Linear(output_dim, output_dim)
         self.hidden_dim = hidden_dim
         self.scale = 1.0 / (self.hidden_dim ** 0.5)
 
     def forward(self, x, bax):
         # x: [batch_size, seq_len, input_dim]
-        # bax: [batch_size, seq_len, num_experts, input_dim]
+        # bax: [batch_size, seq_len, num_experts, output_dim]
         queries = self.query(x)  # [batch_size, seq_len, hidden_dim]
         keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
         values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
@@ -110,6 +110,34 @@ class SelfAttentionRouter(nn.Module):
         print(f"weighted.shape: {weighted.shape}")
 
         return weighted
+
+# class SelfAttentionRouter(nn.Module):
+#     def __init__(self, input_dim: int, bax_dim: int, output_dim: int, hidden_dim: int = 8):
+#         super().__init__()
+#         self.query = nn.Linear(input_dim, hidden_dim)
+#         self.key = nn.Linear(bax_dim, hidden_dim)
+#         self.value = nn.Linear(bax_dim, output_dim)
+#         self.hidden_dim = hidden_dim
+#         self.scale = 1.0 / (self.hidden_dim ** 0.5)
+
+#     def forward(self, x, bax):
+#         # x: [batch_size, seq_len, input_dim]
+#         # bax: [batch_size, seq_len, num_experts, input_dim]
+#         queries = self.query(x)  # [batch_size, seq_len, hidden_dim]
+#         keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
+#         values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
+
+#         # Transpose for attention computation
+#         keys_transposed = keys.transpose(-2, -1)  # [batch_size, seq_len, hidden_dim, num_experts]
+
+#         # Compute scaled dot product attention
+#         scores = torch.einsum('bsh,bshn->bsn', queries, keys_transposed) * self.scale
+#         attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
+
+#         # Apply attention scores to values
+#         weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
+
+#         return weighted
 
 
 class MoloraLayer(BaseTunerLayer):
