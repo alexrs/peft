@@ -95,7 +95,7 @@ if is_bnb_available():
             bax = torch.einsum("bser,erd->bsed", ax, lora_B)
 
             if self.self_attn_router:
-                expert_weights = lora_router(x, bax)
+                output = lora_router(x, bax)
             else:
                 if self.num_experts > 1:
                     # Compute expert_weights using the routing layer
@@ -113,10 +113,8 @@ if is_bnb_available():
                 else:
                     # initialize expert_weights to 1 as we only have one expert
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
-
-
-            # Combine using router probabilities
-            output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+                    # Combine using router probabilities
+                    output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             if requires_conversion:
                 output = output.to(expected_dtype)
@@ -202,7 +200,7 @@ if is_bnb_4bit_available():
             bax = torch.einsum("bser,erd->bsed", ax, lora_B)
 
             if self.self_attn_router:
-                expert_weights = lora_router(x, bax)
+                output = lora_router(x, bax)
             else:
                 if self.num_experts > 1:
                     # Compute expert_weights using the routing layer
@@ -220,9 +218,8 @@ if is_bnb_4bit_available():
                 else:
                     # initialize expert_weights to 1 as we only have one expert
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
-
-            # Combine using router probabilities
-            output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+                    # Combine using router probabilities
+                    output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             if requires_conversion:
                 output = output.to(expected_dtype)
