@@ -83,7 +83,7 @@ from peft.utils.other import transpose
 
 
 class SelfAttentionRouter(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 8):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 4):
         super().__init__()
         self.query = nn.Linear(input_dim, hidden_dim)
         self.key = nn.Linear(output_dim, hidden_dim)
@@ -107,7 +107,6 @@ class SelfAttentionRouter(nn.Module):
 
         # Apply attention scores to values
         weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
-        print(f"weighted.shape: {weighted.shape}")
 
         return weighted
 
