@@ -40,6 +40,10 @@ if is_bnb_available():
             top_k: int = 0,
             top_p: float = 0.0,
             self_attn_router: bool = False,
+            self_attn_hidden_dim: int = 8,
+            random_routing: bool = False,
+            uniform_routing: bool = False,
+            dot_product_routing: bool = False,
             **kwargs,
         ) -> None:
             bnb.nn.Linear8bitLt.__init__(
@@ -52,12 +56,22 @@ if is_bnb_available():
                 threshold=kwargs.get("threshold", 0.0),
                 index=kwargs.get("index", None),
             )
-            MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts, top_k=top_k, top_p=top_p, self_attn_router=self_attn_router)
+            MoloraLayer.__init__(
+                self,
+                in_features=in_features,
+                out_features=out_features,
+                num_experts=num_experts,
+                top_k=top_k,
+                top_p=top_p,
+                self_attn_router=self_attn_router,
+                random_routing=random_routing,
+                uniform_routing=uniform_routing,
+                )
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
             init_lora_weights = kwargs.pop("init_lora_weights", True)
-            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router)
+            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router, self_attn_hidden_dim, dot_product_routing)
             self.set_adapter(adapter_name)
 
         def get_delta_weight(self, adapter):
@@ -96,6 +110,19 @@ if is_bnb_available():
 
             if self.self_attn_router:
                 output = lora_router(x, bax)
+
+            elif self.random_routing:
+                expert_weights = torch.rand(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype)
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
+            elif self.uniform_routing:
+                expert_weights = torch.ones(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype) / self.num_experts
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
+            elif self.dot_product_routing:
+                expert_weights = lora_router(x, bax)
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
             else:
                 if self.num_experts > 1:
                     # Compute expert_weights using the routing layer
@@ -113,8 +140,8 @@ if is_bnb_available():
                 else:
                     # initialize expert_weights to 1 as we only have one expert
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
-                    # Combine using router probabilities
-                    output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+                # Combine using router probabilities
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             if requires_conversion:
                 output = output.to(expected_dtype)
@@ -139,6 +166,10 @@ if is_bnb_4bit_available():
             top_k: int = 0,
             top_p: float = 0.0,
             self_attn_router: bool = False,
+            self_attn_hidden_dim: int = 8,
+            random_routing: bool = False,
+            uniform_routing: bool = False,
+            dot_product_routing: bool = False,
             **kwargs,
         ) -> None:
             bnb.nn.Linear4bit.__init__(
@@ -150,13 +181,23 @@ if is_bnb_4bit_available():
                 compress_statistics=kwargs.get("compress_statistics", True),
                 quant_type=kwargs.get("quant_type", "nf4"),
             )
-            MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts, top_k=top_k, top_p=top_p, self_attn_router=self_attn_router)
+            MoloraLayer.__init__(
+                self,
+                in_features=in_features,
+                out_features=out_features,
+                num_experts=num_experts,
+                top_k=top_k, top_p=top_p,
+                self_attn_router=self_attn_router,
+                random_routing=random_routing,
+                uniform_routing=uniform_routing,
+                dot_product_routing=dot_product_routing,
+            )
 
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
 
             init_lora_weights = kwargs.pop("init_lora_weights", True)
-            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router)
+            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router, self_attn_hidden_dim, dot_product_routing)
             self.set_adapter(adapter_name)
 
         def get_delta_weight(self, adapter):
@@ -201,6 +242,18 @@ if is_bnb_4bit_available():
 
             if self.self_attn_router:
                 output = lora_router(x, bax)
+            elif self.random_routing:
+                expert_weights = torch.rand(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype)
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
+            elif self.uniform_routing:
+                expert_weights = torch.ones(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype) / self.num_experts
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
+            elif self.dot_product_routing:
+                expert_weights = lora_router(x, bax)
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
             else:
                 if self.num_experts > 1:
                     # Compute expert_weights using the routing layer
@@ -218,8 +271,9 @@ if is_bnb_4bit_available():
                 else:
                     # initialize expert_weights to 1 as we only have one expert
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
-                    # Combine using router probabilities
-                    output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
+                # Combine using router probabilities
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             if requires_conversion:
                 output = output.to(expected_dtype)

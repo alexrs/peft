@@ -143,6 +143,22 @@ class MoloraConfig(PeftConfig):
         default=False,
         metadata={"help": "Whether to use self attention router for MoLora."},
     )
+    self_attn_hidden_dim: Optional[int] = field(
+        default=8,
+        metadata={"help": "The hidden dimension of self attention router for MoLora."},
+    )
+    random_routing: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to use random routing for MoLora."},
+    )
+    uniform_routing: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to use uniform routing for MoLora."},
+    )
+    dot_product_routing: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to use dot product routing for MoLora."},
+    )
 
     def __post_init__(self):
         self.peft_type = PeftType.MOLORA

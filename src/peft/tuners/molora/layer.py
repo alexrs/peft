@@ -24,66 +24,8 @@ from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils.other import transpose
 
 
-# class SelfAttentionRouter(nn.Module):
-#     def __init__(self, input_dim: int, bax_dim: int, output_dim: int, hidden_dim: int = 8):
-#         super().__init__()
-#         self.query = nn.Linear(input_dim, hidden_dim)
-#         self.key = nn.Linear(bax_dim, hidden_dim)
-#         self.value = nn.Linear(bax_dim, output_dim)
-#         self.hidden_dim = hidden_dim
-#         self.scale = 1.0 / (self.hidden_dim ** 0.5)
-
-#     def forward(self, x, bax):
-#         # x: [batch_size, seq_len, input_dim]
-#         # bax: [batch_size, seq_len, num_experts, input_dim]
-#         queries = self.query(x)  # [batch_size, seq_len, hidden_dim]
-#         keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
-#         values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
-
-#         # Transpose for attention computation
-#         keys_transposed = keys.transpose(-2, -1)  # [batch_size, seq_len, hidden_dim, num_experts]
-
-#         # Compute scaled dot product attention
-#         scores = torch.einsum('bsh,bshn->bsn', queries, keys_transposed) * self.scale
-#         attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
-
-#         # Apply attention scores to values
-#         weighted = torch.einsum('bsn,bsnd->bsnd', attention.unsqueeze(-1), values)  # [batch_size, seq_len, num_experts, output_dim]
-
-#         # If you want to reduce the dimension to [batch_size, seq_len, num_experts], you can take a mean or sum along the last dimension
-#         weighted = weighted.mean(dim=-1)  # or weighted.sum(dim=-1)
-
-#         return weighted
-
-
-# class SelfAttentionRouter(nn.Module):
-#     def __init__(self, input_dim: int, bax_dim: int, output_dim: int, hidden_dim: int = 8):
-#         super().__init__()
-#         self.query = nn.Linear(input_dim, hidden_dim)
-#         self.key = nn.Linear(bax_dim, hidden_dim)
-#         self.value = nn.Linear(bax_dim, output_dim)
-#         self.hidden_dim = hidden_dim
-#         self.scale = 1.0 / (self.hidden_dim ** 0.5)
-
-#     def forward(self, x, bax):
-#         # x: [batch_size, seq_len, input_dim]
-#         # bax: [batch_size, seq_len, num_experts, input_dim]
-#         queries = self.query(x)  # [batch_size, seq_len, hidden_dim]
-#         keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
-#         values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
-
-#         # Transpose for attention computation
-#         keys_transposed = keys.transpose(-2, -1)  # [batch_size, seq_len, hidden_dim, num_experts]
-
-#         # Compute scaled dot product attention
-#         scores = torch.einsum('bsh,bshn->bsn', queries, keys_transposed) * self.scale
-#         attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
-
-#         return attention
-
-
 class SelfAttentionRouter(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 4):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 8):
         super().__init__()
         self.query = nn.Linear(input_dim, hidden_dim)
         self.key = nn.Linear(output_dim, hidden_dim)
@@ -111,18 +53,34 @@ class SelfAttentionRouter(nn.Module):
 
         return weighted
 
+
+class DotProductRouter(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, bax):
+        # x: [batch_size, seq_len, input_dim]
+        # bax: [batch_size, seq_len, num_experts, output_dim]
+        input_dim = x.shape[-1]
+        scale = 1.0 / (input_dim ** 0.5)
+
+        # Compute scaled dot product between x and each expert in bax
+        scores = torch.einsum('bsh,bshn->bsn', x, bax) * scale
+        attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
+        return attention
+
 # class SelfAttentionRouter(nn.Module):
-#     def __init__(self, input_dim: int, bax_dim: int, output_dim: int, hidden_dim: int = 8):
+#     def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 4):
 #         super().__init__()
 #         self.query = nn.Linear(input_dim, hidden_dim)
-#         self.key = nn.Linear(bax_dim, hidden_dim)
-#         self.value = nn.Linear(bax_dim, output_dim)
+#         self.key = nn.Linear(output_dim, hidden_dim)
+#         self.value = nn.Linear(output_dim, output_dim)
 #         self.hidden_dim = hidden_dim
 #         self.scale = 1.0 / (self.hidden_dim ** 0.5)
 
 #     def forward(self, x, bax):
 #         # x: [batch_size, seq_len, input_dim]
-#         # bax: [batch_size, seq_len, num_experts, input_dim]
+#         # bax: [batch_size, seq_len, num_experts, output_dim]
 #         queries = self.query(x)  # [batch_size, seq_len, hidden_dim]
 #         keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
 #         values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
@@ -144,7 +102,19 @@ class MoloraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
     adapter_layer_names = ["lora_A", "lora_B", "lora_router"]
 
-    def __init__(self, in_features: int, out_features: int, num_experts: int, top_k: float, top_p: float, self_attn_router: bool, **kwargs):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        num_experts: int,
+        top_k: float,
+        top_p: float,
+        self_attn_router: bool,
+        random_routing: bool,
+        uniform_routing: bool,
+        dot_product_routing: bool,
+        **kwargs
+    ):
         self.r = {}
         self.lora_alpha = {}
         self.scaling = {}
@@ -159,6 +129,9 @@ class MoloraLayer(BaseTunerLayer):
         self.out_features = out_features
         self.num_experts = num_experts
         self.self_attn_router = self_attn_router
+        self.random_routing = random_routing
+        self.uniform_routing = uniform_routing
+        self.dot_product_routing = dot_product_routing
         if top_k > 0:
             self.top_k = top_k
         else:
@@ -182,7 +155,7 @@ class MoloraLayer(BaseTunerLayer):
         cls.__init__(self, *args, device="meta", **kwargs)
         self.to_empty(device=final_device)
 
-    def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router):
+    def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router, self_attn_hidden_dim, dot_product_routing):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
         self.r[adapter_name] = r
@@ -198,7 +171,9 @@ class MoloraLayer(BaseTunerLayer):
             self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
             self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
             if self_attn_router:
-                self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features)
+                self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features, self_attn_hidden_dim)
+            elif dot_product_routing:
+                self.lora_router[adapter_name] = DotProductRouter()
             else:
                 self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
             self.scaling[adapter_name] = lora_alpha / r
@@ -290,6 +265,10 @@ class Linear(nn.Linear, MoloraLayer):
         top_k: int = 0,
         top_p: float = 0.0,
         self_attn_router: bool = False,
+        self_attn_hidden_dim: int = 8,
+        random_routing: bool = False,
+        uniform_routing: bool = False,
+        dot_product_routing: bool = False,
         **kwargs,
     ) -> None:
         init_lora_weights = kwargs.pop("init_lora_weights", True)
@@ -299,11 +278,22 @@ class Linear(nn.Linear, MoloraLayer):
         # Note that we don't use self._init_empty_weights() for Linear because it is a bit slower and the benefit of
         # added robustness is not big enough for Linear.
 
-        MoloraLayer.__init__(self, in_features=in_features, out_features=out_features, num_experts=num_experts, top_k=top_k, top_p=top_p, self_attn_router=self_attn_router, **kwargs)
+        MoloraLayer.__init__(
+            self,
+            in_features=in_features,
+            out_features=out_features,
+            num_experts=num_experts,
+            top_k=top_k,
+            top_p=top_p,
+            self_attn_router=self_attn_router,
+            random_routing=random_routing,
+            uniform_routing=uniform_routing,
+            dot_product_routing=dot_product_routing,
+            **kwargs)
         # Freezing the pre-trained weight matrix
 
         self.fan_in_fan_out = fan_in_fan_out
-        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router)
+        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router, self_attn_hidden_dim, dot_product_routing)
         self.set_adapter(adapter_name)
 
     def merge(self, safe_merge: bool = False) -> None:
@@ -384,8 +374,20 @@ class Linear(nn.Linear, MoloraLayer):
             bax = torch.einsum("bser,erd->bsed", ax, lora_B)
 
             if self.self_attn_router:
+                output = lora_router(x, bax)
+
+            elif self.random_routing:
+                expert_weights = torch.rand(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype)
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
+            elif self.uniform_routing:
+                expert_weights = torch.ones(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype) / self.num_experts
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
+            elif self.dot_product_routing:
                 expert_weights = lora_router(x, bax)
-                output = expert_weights * scaling
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+
             else:
                 if self.num_experts > 1:
                     # Compute expert_weights using the routing layer
@@ -405,9 +407,9 @@ class Linear(nn.Linear, MoloraLayer):
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
 
                 # Combine using router probabilities
-                output = torch.einsum("...e,...ed->...d", expert_weights, bax) * scaling
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
-            result += output
+            result += output * scaling
 
         result = result.to(previous_dtype)
         return result

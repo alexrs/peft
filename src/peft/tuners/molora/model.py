@@ -174,6 +174,10 @@ class MoloraModel(BaseTuner):
             "top_k": lora_config.top_k,
             "top_p": lora_config.top_p,
             "self_attn_router": lora_config.self_attn_router,
+            "self_attn_hidden_dim": lora_config.self_attn_hidden_dim,
+            "random_routing": lora_config.random_routing,
+            "uniform_routing": lora_config.uniform_routing,
+            "dot_product_routing": lora_config.dot_product_routing,
         }
         kwargs["loaded_in_8bit"] = optional_kwargs.pop("loaded_in_8bit", False)
         kwargs["loaded_in_4bit"] = optional_kwargs.pop("loaded_in_4bit", False)
@@ -193,6 +197,8 @@ class MoloraModel(BaseTuner):
                 lora_config.init_lora_weights,
                 lora_config.num_experts,
                 lora_config.self_attn_router,
+                lora_config.self_attn_hidden_dim,
+                lora_config.dot_product_routing,
             )
         else:
             new_module = self._create_new_module(lora_config, adapter_name, target, **kwargs)
