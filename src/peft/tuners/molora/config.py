@@ -147,6 +147,10 @@ class MoloraConfig(PeftConfig):
         default=8,
         metadata={"help": "The hidden dimension of self attention router for MoLora."},
     )
+    self_attn_use_value: Optional[bool] = field(
+        default=False,
+        metadata={"help": "Whether to use value for self attention router for MoLora."},
+    )
     random_routing: Optional[bool] = field(
         default=False,
         metadata={"help": "Whether to use random routing for MoLora."},

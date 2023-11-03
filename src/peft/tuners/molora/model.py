@@ -175,6 +175,7 @@ class MoloraModel(BaseTuner):
             "top_p": lora_config.top_p,
             "self_attn_router": lora_config.self_attn_router,
             "self_attn_hidden_dim": lora_config.self_attn_hidden_dim,
+            "self_attn_use_value": lora_config.self_attn_use_value,
             "random_routing": lora_config.random_routing,
             "uniform_routing": lora_config.uniform_routing,
             "dot_product_routing": lora_config.dot_product_routing,
@@ -198,6 +199,7 @@ class MoloraModel(BaseTuner):
                 lora_config.num_experts,
                 lora_config.self_attn_router,
                 lora_config.self_attn_hidden_dim,
+                lora_config.self_attn_use_value,
                 lora_config.dot_product_routing,
             )
         else:

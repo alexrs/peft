@@ -40,7 +40,8 @@ if is_bnb_available():
             top_k: int = 0,
             top_p: float = 0.0,
             self_attn_router: bool = False,
-            self_attn_hidden_dim: int = 8,
+            self_attn_hidden_dim: int = 4,
+            self_attn_use_value: bool = False,
             random_routing: bool = False,
             uniform_routing: bool = False,
             dot_product_routing: bool = False,
@@ -71,7 +72,18 @@ if is_bnb_available():
             # Freezing the pre-trained weight matrix
             self.weight.requires_grad = False
             init_lora_weights = kwargs.pop("init_lora_weights", True)
-            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router, self_attn_hidden_dim, dot_product_routing)
+            self.update_layer(
+                adapter_name,
+                r,
+                lora_alpha,
+                lora_dropout,
+                init_lora_weights,
+                num_experts,
+                self_attn_router,
+                self_attn_hidden_dim,
+                self_attn_use_value,
+                dot_product_routing
+            )
             self.set_adapter(adapter_name)
 
         def get_delta_weight(self, adapter):
@@ -166,7 +178,8 @@ if is_bnb_4bit_available():
             top_k: int = 0,
             top_p: float = 0.0,
             self_attn_router: bool = False,
-            self_attn_hidden_dim: int = 8,
+            self_attn_hidden_dim: int = 4,
+            self_attn_use_value: bool = False,
             random_routing: bool = False,
             uniform_routing: bool = False,
             dot_product_routing: bool = False,
@@ -197,7 +210,18 @@ if is_bnb_4bit_available():
             self.weight.requires_grad = False
 
             init_lora_weights = kwargs.pop("init_lora_weights", True)
-            self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router, self_attn_hidden_dim, dot_product_routing)
+            self.update_layer(
+                adapter_name,
+                r,
+                lora_alpha,
+                lora_dropout,
+                init_lora_weights,
+                num_experts,
+                self_attn_router,
+                self_attn_hidden_dim,
+                self_attn_use_value,
+                dot_product_routing
+            )
             self.set_adapter(adapter_name)
 
         def get_delta_weight(self, adapter):

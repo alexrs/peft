@@ -25,20 +25,23 @@ from peft.utils.other import transpose
 
 
 class SelfAttentionRouter(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 8):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 8, use_value: bool = False):
         super().__init__()
         self.query = nn.Linear(input_dim, hidden_dim)
         self.key = nn.Linear(output_dim, hidden_dim)
-        # self.value = nn.Linear(output_dim, output_dim)
+        if use_value:
+            self.value = nn.Linear(output_dim, output_dim)
         self.hidden_dim = hidden_dim
         self.scale = 1.0 / (self.hidden_dim ** 0.5)
+        self.use_value = use_value
 
     def forward(self, x, bax):
         # x: [batch_size, seq_len, input_dim]
         # bax: [batch_size, seq_len, num_experts, output_dim]
         queries = self.query(x)  # [batch_size, seq_len, hidden_dim]
         keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
-        # values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
+        if self.use_value:
+            values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
 
         # Transpose for attention computation
         keys_transposed = keys.transpose(-2, -1)  # [batch_size, seq_len, hidden_dim, num_experts]
@@ -48,8 +51,10 @@ class SelfAttentionRouter(nn.Module):
         attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
 
         # Apply attention scores to values
-        # weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
-        weighted = torch.einsum('bsn,bsne->bse', attention, bax)  # [batch_size, seq_len, output_dim]
+        if self.use_value:
+            weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
+        else:
+            weighted = torch.einsum('bsn,bsne->bse', attention, bax)  # [batch_size, seq_len, output_dim]
 
         return weighted
 
@@ -155,7 +160,19 @@ class MoloraLayer(BaseTunerLayer):
         cls.__init__(self, *args, device="meta", **kwargs)
         self.to_empty(device=final_device)
 
-    def update_layer(self, adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router, self_attn_hidden_dim, dot_product_routing):
+    def update_layer(
+            self,
+            adapter_name,
+            r,
+            lora_alpha,
+            lora_dropout,
+            init_lora_weights,
+            num_experts,
+            self_attn_router,
+            self_attn_hidden_dim,
+            self_attn_use_value,
+            dot_product_routing
+        ):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
         self.r[adapter_name] = r
@@ -171,14 +188,14 @@ class MoloraLayer(BaseTunerLayer):
             self.lora_A[adapter_name] = nn.Parameter(torch.empty((num_experts, self.in_features, r)))
             self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
             if self_attn_router:
-                self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features, self_attn_hidden_dim)
+                self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features, self_attn_hidden_dim, self_attn_use_value)
             elif dot_product_routing:
                 self.lora_router[adapter_name] = DotProductRouter()
             else:
                 self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
-            self.reset_lora_parameters(adapter_name, self_attn_router)
+            self.reset_lora_parameters(adapter_name, self_attn_router, dot_product_routing)
 
         weight = getattr(self, "weight", None)
         if weight is not None:
@@ -190,7 +207,7 @@ class MoloraLayer(BaseTunerLayer):
         self.set_adapter(self.active_adapters)
 
 
-    def reset_lora_parameters(self, adapter_name, self_attn_router=False):
+    def reset_lora_parameters(self, adapter_name, self_attn_router=False, dot_product_routing=False):
         if adapter_name in self.lora_A.keys():
             # initialize each expert using kaiming_uniform_
             for i in range(self.lora_A[adapter_name].shape[0]):
@@ -201,7 +218,7 @@ class MoloraLayer(BaseTunerLayer):
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].query.weight, a=math.sqrt(5))
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].key.weight, a=math.sqrt(5))
                     # nn.init.kaiming_uniform_(self.lora_router[adapter_name].value.weight, a=math.sqrt(5))
-                else:
+                elif not dot_product_routing:
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].weight, a=math.sqrt(5))
 
 
@@ -265,7 +282,8 @@ class Linear(nn.Linear, MoloraLayer):
         top_k: int = 0,
         top_p: float = 0.0,
         self_attn_router: bool = False,
-        self_attn_hidden_dim: int = 8,
+        self_attn_hidden_dim: int = 4,
+        self_attn_use_value: bool = False,
         random_routing: bool = False,
         uniform_routing: bool = False,
         dot_product_routing: bool = False,
@@ -293,7 +311,18 @@ class Linear(nn.Linear, MoloraLayer):
         # Freezing the pre-trained weight matrix
 
         self.fan_in_fan_out = fan_in_fan_out
-        self.update_layer(adapter_name, r, lora_alpha, lora_dropout, init_lora_weights, num_experts, self_attn_router, self_attn_hidden_dim, dot_product_routing)
+        self.update_layer(
+            adapter_name,
+            r,
+            lora_alpha,
+            lora_dropout,
+            init_lora_weights,
+            num_experts,
+            self_attn_router,
+            self_attn_hidden_dim,
+            self_attn_use_value,
+            dot_product_routing,
+        )
         self.set_adapter(adapter_name)
 
     def merge(self, safe_merge: bool = False) -> None:
