@@ -70,9 +70,15 @@ class DotProductRouter(nn.Module):
         scale = 1.0 / (input_dim ** 0.5)
 
         # Compute scaled dot product between x and each expert in bax
-        scores = torch.einsum('bsh,bshn->bsn', x, bax) * scale
+        # Fix: Ensure the dimensions of x and bax are compatible for einsum
+        x_expanded = x.unsqueeze(-2)  # [batch_size, seq_len, 1, input_dim]
+        # Ensure bax is viewed correctly to align with x_expanded for dot product
+        bax = bax.view(bax.shape[0], bax.shape[1], bax.shape[2], -1)  # [batch_size, seq_len, num_experts, ?]
+        # Fix: Adjust einsum subscripts to account for dot product across input_dim
+        scores = torch.einsum('bsid,bsed->bse', x_expanded, bax) * scale
         attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
         return attention
+
 
 # class SelfAttentionRouter(nn.Module):
 #     def __init__(self, input_dim: int, output_dim: int, hidden_dim: int = 4):
@@ -415,6 +421,8 @@ class Linear(nn.Linear, MoloraLayer):
 
             elif self.dot_product_routing:
                 expert_weights = lora_router(x, bax)
+                print(expert_weights.shape)
+                print(expert_weights)
                 output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             else:
