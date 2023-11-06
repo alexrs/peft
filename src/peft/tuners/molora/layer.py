@@ -421,8 +421,6 @@ class Linear(nn.Linear, MoloraLayer):
 
             elif self.dot_product_routing:
                 expert_weights = lora_router(x, bax)
-                print(expert_weights.shape)
-                print(expert_weights)
                 output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             else:
