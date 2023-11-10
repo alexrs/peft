@@ -50,13 +50,13 @@ class SelfAttentionRouter(nn.Module):
         scores = torch.einsum('bsh,bshn->bsn', queries, keys_transposed) * self.scale
         attention = F.softmax(scores, dim=-1)  # [batch_size, seq_len, num_experts]
 
+        # print(f"attention: {attention}")
         # Apply attention scores to values
         if self.use_value:
             weighted = torch.einsum('bsn,bsne->bse', attention, values)  # [batch_size, seq_len, output_dim]
+            return weighted
         else:
-            weighted = torch.einsum('bsn,bsne->bse', attention, bax)  # [batch_size, seq_len, output_dim]
-
-        return weighted
+            return attention
 
 
 class DotProductRouter(nn.Module):
@@ -409,7 +409,11 @@ class Linear(nn.Linear, MoloraLayer):
             bax = torch.einsum("bser,erd->bsed", ax, lora_B)
 
             if self.self_attn_router:
-                output = lora_router(x, bax)
+                # assume we do not use value
+                # output = lora_router(x, bax)
+                expert_weights = lora_router(x, bax)
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+                # output = torch.einsum('bsn,bsne->bse', attention, bax)  # [batch_size, seq_len, output_dim]
 
             elif self.random_routing:
                 expert_weights = torch.rand(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype)

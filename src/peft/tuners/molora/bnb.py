@@ -121,7 +121,11 @@ if is_bnb_available():
             bax = torch.einsum("bser,erd->bsed", ax, lora_B)
 
             if self.self_attn_router:
-                output = lora_router(x, bax)
+                # assume we do not use value
+                # output = lora_router(x, bax)
+                expert_weights = lora_router(x, bax)
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+                # output = torch.einsum('bsn,bsne->bse', attention, bax)  # [batch_si
 
             elif self.random_routing:
                 expert_weights = torch.rand(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype)
@@ -265,7 +269,12 @@ if is_bnb_4bit_available():
             bax = torch.einsum("bser,erd->bsed", ax, lora_B)
 
             if self.self_attn_router:
-                output = lora_router(x, bax)
+                # assume we do not use value
+                # output = lora_router(x, bax)
+                expert_weights = lora_router(x, bax)
+                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
+                # output = torch.einsum('bsn,bsne->bse', attention, bax)  # [batch_si
+
             elif self.random_routing:
                 expert_weights = torch.rand(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype)
                 output = torch.einsum("...e,...ed->...d", expert_weights, bax)
