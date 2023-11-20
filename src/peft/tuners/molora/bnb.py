@@ -44,7 +44,7 @@ if is_bnb_available():
             self_attn_use_value: bool = False,
             random_routing: bool = False,
             uniform_routing: bool = False,
-            dot_product_routing: bool = False,
+            router_dropout: float = 0.0,
             **kwargs,
         ) -> None:
             bnb.nn.Linear8bitLt.__init__(
@@ -82,7 +82,7 @@ if is_bnb_available():
                 self_attn_router,
                 self_attn_hidden_dim,
                 self_attn_use_value,
-                dot_product_routing
+                router_dropout,
             )
             self.set_adapter(adapter_name)
 
@@ -135,10 +135,6 @@ if is_bnb_available():
                 expert_weights = torch.ones(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype) / self.num_experts
                 output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
-            elif self.dot_product_routing:
-                expert_weights = lora_router(x, bax)
-                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
-
             else:
                 if self.num_experts > 1:
                     # Compute expert_weights using the routing layer
@@ -186,7 +182,7 @@ if is_bnb_4bit_available():
             self_attn_use_value: bool = False,
             random_routing: bool = False,
             uniform_routing: bool = False,
-            dot_product_routing: bool = False,
+            router_dropout: float = 0.0,
             **kwargs,
         ) -> None:
             bnb.nn.Linear4bit.__init__(
@@ -207,7 +203,6 @@ if is_bnb_4bit_available():
                 self_attn_router=self_attn_router,
                 random_routing=random_routing,
                 uniform_routing=uniform_routing,
-                dot_product_routing=dot_product_routing,
             )
 
             # Freezing the pre-trained weight matrix
@@ -224,7 +219,7 @@ if is_bnb_4bit_available():
                 self_attn_router,
                 self_attn_hidden_dim,
                 self_attn_use_value,
-                dot_product_routing
+                router_dropout,
             )
             self.set_adapter(adapter_name)
 
@@ -281,10 +276,6 @@ if is_bnb_4bit_available():
 
             elif self.uniform_routing:
                 expert_weights = torch.ones(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype) / self.num_experts
-                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
-
-            elif self.dot_product_routing:
-                expert_weights = lora_router(x, bax)
                 output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             else:

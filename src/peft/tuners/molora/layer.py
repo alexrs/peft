@@ -123,7 +123,6 @@ class MoloraLayer(BaseTunerLayer):
         self_attn_router: bool,
         random_routing: bool,
         uniform_routing: bool,
-        dot_product_routing: bool,
         **kwargs
     ):
         self.r = {}
@@ -142,7 +141,6 @@ class MoloraLayer(BaseTunerLayer):
         self.self_attn_router = self_attn_router
         self.random_routing = random_routing
         self.uniform_routing = uniform_routing
-        self.dot_product_routing = dot_product_routing
         if top_k > 0:
             self.top_k = top_k
         else:
@@ -177,7 +175,7 @@ class MoloraLayer(BaseTunerLayer):
             self_attn_router,
             self_attn_hidden_dim,
             self_attn_use_value,
-            dot_product_routing
+            router_dropout,
         ):
         if r <= 0:
             raise ValueError(f"`r` should be a positive integer value but the value passed is {r}")
@@ -195,13 +193,14 @@ class MoloraLayer(BaseTunerLayer):
             self.lora_B[adapter_name] = nn.Parameter(torch.empty((num_experts, r, self.out_features)))
             if self_attn_router:
                 self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features, self_attn_hidden_dim, self_attn_use_value)
-            elif dot_product_routing:
-                self.lora_router[adapter_name] = DotProductRouter()
             else:
-                self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
+                self.lora_router[adapter_name] = nn.Sequential(
+                    nn.Linear(self.in_features, num_experts),
+                    nn.Dropout(p=router_dropout),
+                )
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
-            self.reset_lora_parameters(adapter_name, self_attn_router, dot_product_routing)
+            self.reset_lora_parameters(adapter_name, self_attn_router)
 
         weight = getattr(self, "weight", None)
         if weight is not None:
@@ -213,7 +212,7 @@ class MoloraLayer(BaseTunerLayer):
         self.set_adapter(self.active_adapters)
 
 
-    def reset_lora_parameters(self, adapter_name, self_attn_router=False, dot_product_routing=False):
+    def reset_lora_parameters(self, adapter_name, self_attn_router=False):
         if adapter_name in self.lora_A.keys():
             # initialize each expert using kaiming_uniform_
             for i in range(self.lora_A[adapter_name].shape[0]):
@@ -223,10 +222,6 @@ class MoloraLayer(BaseTunerLayer):
                 if self_attn_router:
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].query.weight, a=math.sqrt(5))
                     nn.init.kaiming_uniform_(self.lora_router[adapter_name].key.weight, a=math.sqrt(5))
-                    # nn.init.kaiming_uniform_(self.lora_router[adapter_name].value.weight, a=math.sqrt(5))
-                elif not dot_product_routing:
-                    nn.init.kaiming_uniform_(self.lora_router[adapter_name].weight, a=math.sqrt(5))
-
 
     def scale_layer(self, scale_factor: float) -> None:
         if scale_factor != 1:
@@ -292,7 +287,7 @@ class Linear(nn.Linear, MoloraLayer):
         self_attn_use_value: bool = False,
         random_routing: bool = False,
         uniform_routing: bool = False,
-        dot_product_routing: bool = False,
+        router_dropout: float = 0.0,
         **kwargs,
     ) -> None:
         init_lora_weights = kwargs.pop("init_lora_weights", True)
@@ -312,7 +307,7 @@ class Linear(nn.Linear, MoloraLayer):
             self_attn_router=self_attn_router,
             random_routing=random_routing,
             uniform_routing=uniform_routing,
-            dot_product_routing=dot_product_routing,
+            router_dropout=router_dropout,
             **kwargs)
         # Freezing the pre-trained weight matrix
 
@@ -327,7 +322,7 @@ class Linear(nn.Linear, MoloraLayer):
             self_attn_router,
             self_attn_hidden_dim,
             self_attn_use_value,
-            dot_product_routing,
+            router_dropout,
         )
         self.set_adapter(adapter_name)
 
@@ -421,10 +416,6 @@ class Linear(nn.Linear, MoloraLayer):
 
             elif self.uniform_routing:
                 expert_weights = torch.ones(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype) / self.num_experts
-                output = torch.einsum("...e,...ed->...d", expert_weights, bax)
-
-            elif self.dot_product_routing:
-                expert_weights = lora_router(x, bax)
                 output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
             else:

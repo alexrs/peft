@@ -159,9 +159,9 @@ class MoloraConfig(PeftConfig):
         default=False,
         metadata={"help": "Whether to use uniform routing for MoLora."},
     )
-    dot_product_routing: Optional[bool] = field(
-        default=False,
-        metadata={"help": "Whether to use dot product routing for MoLora."},
+    router_dropout: Optional[float] = field(
+        default=0.0,
+        metadata={"help": "The dropout rate of router for MoLora."},
     )
 
     def __post_init__(self):

@@ -178,7 +178,7 @@ class MoloraModel(BaseTuner):
             "self_attn_use_value": lora_config.self_attn_use_value,
             "random_routing": lora_config.random_routing,
             "uniform_routing": lora_config.uniform_routing,
-            "dot_product_routing": lora_config.dot_product_routing,
+            "router_dropout": lora_config.router_dropout,
         }
         kwargs["loaded_in_8bit"] = optional_kwargs.pop("loaded_in_8bit", False)
         kwargs["loaded_in_4bit"] = optional_kwargs.pop("loaded_in_4bit", False)
@@ -200,7 +200,7 @@ class MoloraModel(BaseTuner):
                 lora_config.self_attn_router,
                 lora_config.self_attn_hidden_dim,
                 lora_config.self_attn_use_value,
-                lora_config.dot_product_routing,
+                lora_config.router_dropout,
             )
         else:
             new_module = self._create_new_module(lora_config, adapter_name, target, **kwargs)
