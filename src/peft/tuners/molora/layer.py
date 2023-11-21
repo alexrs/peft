@@ -127,6 +127,7 @@ class MoloraLayer(BaseTunerLayer):
         uniform_routing: bool,
         **kwargs
     ) -> None:
+        self.base_layer = base_layer
         self.r = {}
         self.lora_alpha = {}
         self.scaling = {}
@@ -150,8 +151,8 @@ class MoloraLayer(BaseTunerLayer):
         self.kwargs = kwargs
 
         base_layer = self.get_base_layer()
+
         in_features, out_features = base_layer.in_features, base_layer.out_features
-        # in_features, out_features = base_layer.infeatures, base_layer.outfeatures
 
         self.in_features = in_features
         self.out_features = out_features
@@ -193,7 +194,8 @@ class MoloraLayer(BaseTunerLayer):
                 router_dropout_layer = nn.Dropout(p=router_dropout)
             else:
                 router_dropout_layer = nn.Identity()
-                self.router_dropout.update(nn.ModuleDict({adapter_name: router_dropout_layer}))
+
+            self.router_dropout.update(nn.ModuleDict({adapter_name: router_dropout_layer}))
 
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:

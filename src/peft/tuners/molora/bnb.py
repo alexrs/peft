@@ -149,6 +149,10 @@ if is_bnb_available():
 
             return result
 
+        def __repr__(self) -> str:
+            rep = super().__repr__()
+            return "molora." + rep
+
 
 if is_bnb_4bit_available():
 
@@ -186,7 +190,7 @@ if is_bnb_4bit_available():
             )
 
             # Freezing the pre-trained weight matrix
-            self.weight.requires_grad = False
+            # self.get_base_layer().weight.requires_grad = False
 
             init_lora_weights = kwargs.pop("init_lora_weights", True)
             self.update_layer(
@@ -212,7 +216,7 @@ if is_bnb_4bit_available():
                 * self.scaling[adapter]
             )
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
+        def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
             result = self.base_layer(x, *args, **kwargs)
             # As per Tim Dettmers, for 4bit, we need to defensively clone here.
             # The reason is that in some cases, an error can occur that backprop
@@ -286,3 +290,7 @@ if is_bnb_4bit_available():
             result += output * scaling
 
             return result
+
+        def __repr__(self) -> str:
+            rep = super().__repr__()
+            return "molora." + rep

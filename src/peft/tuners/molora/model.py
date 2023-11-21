@@ -184,7 +184,7 @@ class MoloraModel(BaseTuner):
             kwargs["gptq_quantization_config"] = quantization_config
 
         # TODO: better deal with that
-        if isinstance(target, MoloraLayer):
+        if isinstance(target, Linear):
             target.update_layer(
                 adapter_name,
                 r,
