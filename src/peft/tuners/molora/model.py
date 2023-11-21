@@ -12,20 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import os
 import re
 import warnings
-import inspect
-from typing import Any, List
 from dataclasses import asdict
 from enum import Enum
 from itertools import chain
-from accelerate import dispatch_model, infer_auto_device_map
-from accelerate.hooks import AlignDevicesHook, add_hook_to_module, remove_hook_from_submodules
-from accelerate.utils import get_balanced_memory
 
 import torch
-import torch.nn as nn
 from tqdm import tqdm
 
 from peft.import_utils import is_bnb_4bit_available, is_bnb_available
@@ -108,6 +101,8 @@ class MoloraModel(BaseTuner):
         - **model** ([`~transformers.PreTrainedModel`]) -- The model to be adapted.
         - **peft_config** ([`LoraConfig`]): The configuration of the Lora model.
     """
+
+    prefix: str = "lora_"
 
     def __init__(self, model, config, adapter_name) -> None:
         super().__init__(model, config, adapter_name)
@@ -209,29 +204,36 @@ class MoloraModel(BaseTuner):
                 new_module.requires_grad_(False)
             self._replace_module(parent, target_name, new_module, target)
 
-    @staticmethod
-    def _replace_module(parent, child_name, new_module, child):
+    def _replace_module(self, parent, child_name, new_module, child):
         setattr(parent, child_name, new_module)
         # It's not necessary to set requires_grad here, as that is handled by
         # _mark_only_adapters_as_trainable
-        new_module.weight = child.weight
-        if hasattr(child, "bias"):
-            new_module.bias = child.bias
+
+        # child layer wraps the original module, unpack it
+        if hasattr(child, "base_layer"):
+            child = child.base_layer
+
+        if not hasattr(new_module, "base_layer"):
+            new_module.weight = child.weight
+            if hasattr(child, "bias"):
+                new_module.bias = child.bias
 
         if getattr(child, "state", None) is not None:
-            new_module.state = child.state
+            if hasattr(new_module, "base_layer"):
+                new_module.base_layer.state = child.state
+            else:
+                new_module.state = child.state
             new_module.to(child.weight.device)
 
         # dispatch to correct device
         for name, module in new_module.named_modules():
-            if "lora_" in name:
-                module.to(child.weight.device)
-            if "ranknum" in name:
-                module.to(child.weight.device)
+            if (self.prefix in name) or ("ranknum" in name):
+                weight = child.qweight if hasattr(child, "qweight") else child.weight
+                module.to(weight.device)
 
     def _mark_only_adapters_as_trainable(self) -> None:
         for n, p in self.model.named_parameters():
-            if "lora_" not in n:
+            if self.prefix not in n:
                 p.requires_grad = False
 
         for active_adapter in self.active_adapters:
@@ -262,9 +264,13 @@ class MoloraModel(BaseTuner):
 
         loaded_in_8bit = kwargs.pop("loaded_in_8bit", False)
         loaded_in_4bit = kwargs.pop("loaded_in_4bit", False)
-        bias = kwargs.pop("bias", False)
 
-        if loaded_in_8bit and isinstance(target, bnb.nn.Linear8bitLt):
+        if isinstance(target, BaseTunerLayer):
+            target_base_layer = target.get_base_layer()
+        else:
+            target_base_layer = target
+
+        if loaded_in_8bit and isinstance(target_base_layer, bnb.nn.Linear8bitLt):
             eightbit_kwargs = kwargs.copy()
             eightbit_kwargs.update(
                 {
@@ -275,9 +281,9 @@ class MoloraModel(BaseTuner):
                 }
             )
             new_module = Linear8bitLt(
-                adapter_name, target.in_features, target.out_features, bias=bias, **eightbit_kwargs
+                target, adapter_name, **eightbit_kwargs
             )
-        elif loaded_in_4bit and is_bnb_4bit_available() and isinstance(target, bnb.nn.Linear4bit):
+        elif loaded_in_4bit and is_bnb_4bit_available() and isinstance(target_base_layer, bnb.nn.Linear4bit):
             fourbit_kwargs = kwargs.copy()
             fourbit_kwargs.update(
                 {
@@ -286,19 +292,12 @@ class MoloraModel(BaseTuner):
                     "quant_type": target.weight.quant_type,
                 }
             )
-            new_module = Linear4bit(
-                adapter_name,
-                target.in_features,
-                target.out_features,
-                bias=bias,
-                **fourbit_kwargs,
-            )
-        elif AutoGPTQQuantLinear is not None and isinstance(target, AutoGPTQQuantLinear):
+            new_module = Linear4bit(target, adapter_name, **fourbit_kwargs)
+        elif AutoGPTQQuantLinear is not None and isinstance(target_base_layer, AutoGPTQQuantLinear):
             new_module = QuantLinear(adapter_name, target, **kwargs)
             target.weight = target.qweight
         else:
-            if isinstance(target, torch.nn.Linear):
-                in_features, out_features = target.in_features, target.out_features
+            if isinstance(target_base_layer, torch.nn.Linear):
                 if kwargs["fan_in_fan_out"]:
                     warnings.warn(
                         "fan_in_fan_out is set to True but the target module is `torch.nn.Linear`. "
@@ -310,7 +309,7 @@ class MoloraModel(BaseTuner):
                     f"Target module {target} is not supported. Currently, only the following modules are supported: "
                     "`torch.nn.Linear`."
                 )
-            new_module = Linear(adapter_name, in_features, out_features, bias=bias, **kwargs)
+            new_module = Linear(target, adapter_name, **kwargs)
 
         return new_module
 
@@ -353,6 +352,7 @@ class MoloraModel(BaseTuner):
         for module in self.model.modules():
             if isinstance(module, MoloraLayer):
                 module.set_adapter(adapter_name)
+        self.active_adapter = adapter_name
 
     @staticmethod
     def _prepare_adapter_config(peft_config, model_config):
@@ -362,7 +362,12 @@ class MoloraModel(BaseTuner):
             peft_config.target_modules = TRANSFORMERS_MODELS_TO_LORA_TARGET_MODULES_MAPPING[model_config["model_type"]]
         return peft_config
 
-    def _unload_and_optionally_merge(self, merge=True, progressbar: bool = False, safe_merge: bool = False):
+    def _unload_and_optionally_merge(
+        self,
+        merge=True,
+        progressbar: bool = False,
+        safe_merge: bool = False
+    ):
         if merge:
             if getattr(self.model, "quantization_method", None) == "gptq":
                 raise ValueError("Cannot merge MoLoRA layers when the model is gptq quantized")
@@ -374,39 +379,13 @@ class MoloraModel(BaseTuner):
                 parent, target, target_name = _get_submodules(self.model, key)
             except AttributeError:
                 continue
-            if isinstance(target, MoloraLayer):
-                if is_bnb_available() and isinstance(target, Linear8bitLt):
-                    bias = target.base_layer.bias is not None
-                    new_module = bnb.nn.Linear8bitLt(
-                        target.in_features,
-                        target.out_features,
-                        bias=bias,
-                        has_fp16_weights=target.base_layer.state.has_fp16_weights,
-                        memory_efficient_backward=target.base_layer.state.memory_efficient_backward,
-                        threshold=target.base_layer.state.threshold,
-                        index=target.base_layer.index,
-                        device=target.base_layer.weight.device,
-                    )
-                elif is_bnb_4bit_available() and isinstance(target, Linear4bit):
-                    bias = target.base_layer.bias is not None
-                    new_module = bnb.nn.Linear4bit(
-                        target.in_features,
-                        target.out_features,
-                        bias=bias,
-                        compute_dtype=target.base_layer.compute_dtype,
-                        compress_statistics=target.base_layer.weight.compress_statistics,
-                        quant_type=target.base_layer.weight.quant_type,
-                        device=target.base_layer.weight.device,
-                    )
-                else:
-                    bias = target.bias is not None
-                    new_module = torch.nn.Linear(target.in_features, target.out_features, bias=bias)
-                if merge:
-                    target.merge(safe_merge=safe_merge)
-                self._replace_module(parent, target_name, new_module, target)
 
-            # save any additional trainable modules part of `modules_to_save`
-            if isinstance(target, ModulesToSaveWrapper):
+            if hasattr(target, "base_layer"):
+                if merge:
+                    target.merge(safe_merge=safe_merge, adapter_names=adapter_names)
+                self._replace_module(parent, target_name, target.get_base_layer(), target)
+            elif isinstance(target, ModulesToSaveWrapper):
+                # save any additional trainable modules part of `modules_to_save`
                 setattr(parent, target_name, target.modules_to_save[target.active_adapter])
 
         return self.model

@@ -26,13 +26,12 @@ from .layer import MoloraLayer
 
 if is_bnb_available():
 
-    class Linear8bitLt(bnb.nn.Linear8bitLt, MoloraLayer):
+    class Linear8bitLt(torch.nn.Module, MoloraLayer):
         # Lora implemented in a dense layer
         def __init__(
             self,
+            base_layer: torch.nn.Module,
             adapter_name,
-            in_features,
-            out_features,
             r: int = 0,
             lora_alpha: int = 1,
             lora_dropout: float = 0.0,
@@ -47,20 +46,10 @@ if is_bnb_available():
             router_dropout: float = 0.0,
             **kwargs,
         ) -> None:
-            bnb.nn.Linear8bitLt.__init__(
-                self,
-                in_features,
-                out_features,
-                bias=kwargs.get("bias", True),
-                has_fp16_weights=kwargs.get("has_fp16_weights", True),
-                memory_efficient_backward=kwargs.get("memory_efficient_backward", False),
-                threshold=kwargs.get("threshold", 0.0),
-                index=kwargs.get("index", None),
-            )
+            super().__init__()
             MoloraLayer.__init__(
                 self,
-                in_features=in_features,
-                out_features=out_features,
+                base_layer,
                 num_experts=num_experts,
                 top_k=top_k,
                 top_p=top_p,
@@ -69,8 +58,6 @@ if is_bnb_available():
                 uniform_routing=uniform_routing,
                 )
 
-            # Freezing the pre-trained weight matrix
-            self.weight.requires_grad = False
             init_lora_weights = kwargs.pop("init_lora_weights", True)
             self.update_layer(
                 adapter_name,
@@ -95,8 +82,8 @@ if is_bnb_available():
                 * self.scaling[adapter]
             )
 
-        def forward(self, x: torch.Tensor) -> torch.Tensor:
-            result = super().forward(x)
+        def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+            result = self.base_layer(x, *args, **kwargs)
 
             # The molora model only supports one active adapter at a time
             active_adapter = self.active_adapters[0]
@@ -165,16 +152,16 @@ if is_bnb_available():
 
 if is_bnb_4bit_available():
 
-    class Linear4bit(bnb.nn.Linear4bit, MoloraLayer):
+    class Linear4bit(torch.nn.Module, MoloraLayer):
         # Lora implemented in a dense layer
         def __init__(
             self,
-            adapter_name,
-            in_features,
-            out_features,
+            base_layer: torch.nn.Module,
+            adapter_name: str,
             r: int = 0,
             lora_alpha: int = 1,
             lora_dropout: float = 0.0,
+            init_lora_weights: bool = True,
             num_experts: int = 1,
             top_k: int = 0,
             top_p: float = 0.0,
@@ -186,21 +173,13 @@ if is_bnb_4bit_available():
             router_dropout: float = 0.0,
             **kwargs,
         ) -> None:
-            bnb.nn.Linear4bit.__init__(
-                self,
-                in_features,
-                out_features,
-                bias=kwargs.get("bias", True),
-                compute_dtype=kwargs.get("compute_dtype", torch.float32),
-                compress_statistics=kwargs.get("compress_statistics", True),
-                quant_type=kwargs.get("quant_type", "nf4"),
-            )
+            super().__init__()
             MoloraLayer.__init__(
                 self,
-                in_features=in_features,
-                out_features=out_features,
+                base_layer,
                 num_experts=num_experts,
-                top_k=top_k, top_p=top_p,
+                top_k=top_k,
+                top_p=top_p,
                 self_attn_router=self_attn_router,
                 random_routing=random_routing,
                 uniform_routing=uniform_routing,
@@ -234,7 +213,7 @@ if is_bnb_4bit_available():
             )
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            result = super().forward(x)
+            result = self.base_layer(x, *args, **kwargs)
             # As per Tim Dettmers, for 4bit, we need to defensively clone here.
             # The reason is that in some cases, an error can occur that backprop
             # does not work on a manipulated view. This issue may be solved with

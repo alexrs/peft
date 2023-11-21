@@ -15,6 +15,7 @@
 
 import math
 import warnings
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -111,12 +112,13 @@ class DotProductRouter(nn.Module):
 
 class MoloraLayer(BaseTunerLayer):
     # List all names of layers that may contain adapter weights
-    adapter_layer_names = ["lora_A", "lora_B", "lora_router"]
+    adapter_layer_names = ("lora_A", "lora_B", "lora_router")
+    # All names of other parameters that may contain adapter-related parameters
+    other_param_names = ("r", "lora_alpha", "scaling", "lora_dropout", "router_dropout")
 
     def __init__(
         self,
-        in_features: int,
-        out_features: int,
+        base_layer: nn.Module,
         num_experts: int,
         top_k: float,
         top_p: float,
@@ -124,7 +126,7 @@ class MoloraLayer(BaseTunerLayer):
         random_routing: bool,
         uniform_routing: bool,
         **kwargs
-    ):
+    ) -> None:
         self.r = {}
         self.lora_alpha = {}
         self.scaling = {}
@@ -136,8 +138,6 @@ class MoloraLayer(BaseTunerLayer):
 
         self._disable_adapters = False
         self.merged_adapters = []
-        self.in_features = in_features
-        self.out_features = out_features
         self.num_experts = num_experts
         self.self_attn_router = self_attn_router
         self.random_routing = random_routing
@@ -149,21 +149,13 @@ class MoloraLayer(BaseTunerLayer):
         self.top_p = top_p
         self.kwargs = kwargs
 
-    @property
-    def merged(self) -> bool:
-        return bool(self.merged_adapters)
+        base_layer = self.get_base_layer()
+        in_features, out_features = base_layer.in_features, base_layer.out_features
+        # in_features, out_features = base_layer.infeatures, base_layer.outfeatures
 
-    def _init_empty_weights(self, cls, *args, **kwargs) -> None:
-        # A helper method that allows to initialize the layer of the given class without spending time to initialize the
-        # model weights. The implementation is inspired by
-        # https://pytorch.org/docs/stable/generated/torch.nn.utils.skip_init.html but this function cannot be used
-        # directly.
-        # Instead of this approach, it would be possible to bypass the __init__ of the class but that runs the risk of
-        # omitting important logic inside that __init__.
-        kwargs = kwargs.copy()
-        final_device = kwargs.pop("device", "cpu")
-        cls.__init__(self, *args, device="meta", **kwargs)
-        self.to_empty(device=final_device)
+        self.in_features = in_features
+        self.out_features = out_features
+
 
     def update_layer(
             self,
@@ -198,19 +190,16 @@ class MoloraLayer(BaseTunerLayer):
                 self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
 
             if router_dropout > 0.0:
-                router_dropout = nn.Dropout(p=router_dropout)
+                router_dropout_layer = nn.Dropout(p=router_dropout)
             else:
-                router_dropout = nn.Identity()
-                self.router_dropout.update(nn.ModuleDict({adapter_name: router_dropout}))
-                # self.lora_router[adapter_name] = nn.Sequential(
-                #     nn.Linear(self.in_features, num_experts),
-                #     nn.Dropout(p=router_dropout),
-                # )
+                router_dropout_layer = nn.Identity()
+                self.router_dropout.update(nn.ModuleDict({adapter_name: router_dropout_layer}))
+
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name, self_attn_router)
 
-        weight = getattr(self, "weight", None)
+        weight = getattr(self.get_base_layer(), "weight", None)
         if weight is not None:
             # the layer is already completely initialized, this is an update
             if weight.dtype.is_floating_point or weight.dtype.is_complex:
@@ -276,13 +265,12 @@ class MoloraLayer(BaseTunerLayer):
 #  ------------------------------------------------------------------------------------------
 
 
-class Linear(nn.Linear, MoloraLayer):
+class Linear(nn.Module, MoloraLayer):
     # Lora implemented in a dense layer
     def __init__(
         self,
+        base_layer,
         adapter_name: str,
-        in_features: int,
-        out_features: int,
         r: int = 0,
         lora_alpha: int = 1,
         lora_dropout: float = 0.0,
@@ -299,16 +287,10 @@ class Linear(nn.Linear, MoloraLayer):
         **kwargs,
     ) -> None:
         init_lora_weights = kwargs.pop("init_lora_weights", True)
-        # this gets the init from nn.Linear's super perspective, i.e.
-        # nn.Module.__init__, which should always be called
-        super(nn.Linear, self).__init__()
-        # Note that we don't use self._init_empty_weights() for Linear because it is a bit slower and the benefit of
-        # added robustness is not big enough for Linear.
-
+        super().__init__()
         MoloraLayer.__init__(
             self,
-            in_features=in_features,
-            out_features=out_features,
+            base_layer,
             num_experts=num_experts,
             top_k=top_k,
             top_p=top_p,
@@ -317,9 +299,9 @@ class Linear(nn.Linear, MoloraLayer):
             uniform_routing=uniform_routing,
             router_dropout=router_dropout,
             **kwargs)
-        # Freezing the pre-trained weight matrix
 
         self.fan_in_fan_out = fan_in_fan_out
+        self._active_adapter = adapter_name
         self.update_layer(
             adapter_name,
             r,
@@ -392,9 +374,9 @@ class Linear(nn.Linear, MoloraLayer):
     def _linear(self, input: torch.Tensor) -> torch.Tensor:
         return F.linear(input, transpose(self.weight, self.fan_in_fan_out), bias=self.bias)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, *args: Any, **kwargs: Any) -> torch.Tensor:
         previous_dtype = x.dtype
-        result = self._linear(x)
+        result = self.base_layer(x, *args, **kwargs)
 
         # The molora model only supports one active adapter at a time
         active_adapter = self.active_adapters[0]
