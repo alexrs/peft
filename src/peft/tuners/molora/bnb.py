@@ -104,6 +104,7 @@ if is_bnb_available():
                 lora_A = self.lora_A[active_adapter]
                 lora_B = self.lora_B[active_adapter]
                 lora_router = self.lora_router[active_adapter]
+                router_dropout = self.lora_dropout[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
@@ -148,7 +149,7 @@ if is_bnb_available():
                     if self.top_p > 0.0:
                         logits = self.top_p_routing(logits, self.top_p)
 
-                    expert_weights = F.softmax(logits, dim=-1)
+                    expert_weights = router_dropout(F.softmax(logits, dim=-1))
                 else:
                     # initialize expert_weights to 1 as we only have one expert
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
@@ -247,6 +248,7 @@ if is_bnb_4bit_available():
                 lora_A = self.lora_A[active_adapter]
                 lora_B = self.lora_B[active_adapter]
                 lora_router = self.lora_router[active_adapter]
+                router_dropout = self.lora_dropout[active_adapter]
                 dropout = self.lora_dropout[active_adapter]
                 scaling = self.scaling[active_adapter]
 
@@ -291,7 +293,7 @@ if is_bnb_4bit_available():
                     if self.top_p > 0.0:
                         logits = self.top_p_routing(logits, self.top_p)
 
-                    expert_weights = F.softmax(logits, dim=-1)
+                    expert_weights = router_dropout(F.softmax(logits, dim=-1))
                 else:
                     # initialize expert_weights to 1 as we only have one expert
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)

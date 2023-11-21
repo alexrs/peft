@@ -132,6 +132,7 @@ class MoloraLayer(BaseTunerLayer):
         self.lora_A = nn.ParameterDict({})
         self.lora_B = nn.ParameterDict({})
         self.lora_router = nn.ModuleDict({})
+        self.router_dropout = nn.ModuleDict({})
 
         self._disable_adapters = False
         self.merged_adapters = []
@@ -194,11 +195,17 @@ class MoloraLayer(BaseTunerLayer):
             if self_attn_router:
                 self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features, self_attn_hidden_dim, self_attn_use_value)
             else:
+                self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
+
+            if router_dropout > 0.0:
+                router_dropout = nn.Dropout(p=router_dropout)
+            else:
+                router_dropout = nn.Identity()
+                self.router_dropout.update(nn.ModuleDict({adapter_name: router_dropout}))
                 # self.lora_router[adapter_name] = nn.Sequential(
                 #     nn.Linear(self.in_features, num_experts),
                 #     nn.Dropout(p=router_dropout),
                 # )
-                self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name, self_attn_router)
@@ -395,6 +402,7 @@ class Linear(nn.Linear, MoloraLayer):
             lora_A = self.lora_A[active_adapter]
             lora_B = self.lora_B[active_adapter]
             lora_router = self.lora_router[active_adapter]
+            router_dropout = self.router_dropout[active_adapter]
             dropout = self.lora_dropout[active_adapter]
             scaling = self.scaling[active_adapter]
 
@@ -432,8 +440,7 @@ class Linear(nn.Linear, MoloraLayer):
                     if self.top_p > 0.0:
                         logits = self.top_p_routing(logits, self.top_p)
 
-                    expert_weights = F.softmax(logits, dim=-1)
-                    # expert_weights = router_dropout(expert_weights)
+                    expert_weights = router_dropout(F.softmax(logits, dim=-1))
                 else:
                     # initialize expert_weights to 1 as we only have one expert
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
