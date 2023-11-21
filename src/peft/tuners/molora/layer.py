@@ -194,10 +194,11 @@ class MoloraLayer(BaseTunerLayer):
             if self_attn_router:
                 self.lora_router[adapter_name] = SelfAttentionRouter(self.in_features, self.out_features, self_attn_hidden_dim, self_attn_use_value)
             else:
-                self.lora_router[adapter_name] = nn.Sequential(
-                    nn.Linear(self.in_features, num_experts),
-                    nn.Dropout(p=router_dropout),
-                )
+                # self.lora_router[adapter_name] = nn.Sequential(
+                #     nn.Linear(self.in_features, num_experts),
+                #     nn.Dropout(p=router_dropout),
+                # )
+                self.lora_router[adapter_name] = nn.Linear(self.in_features, num_experts)
             self.scaling[adapter_name] = lora_alpha / r
         if init_lora_weights:
             self.reset_lora_parameters(adapter_name, self_attn_router)
@@ -418,7 +419,7 @@ class Linear(nn.Linear, MoloraLayer):
                 expert_weights = torch.ones(x.size(0), x.size(1), self.num_experts, device=x.device, dtype=x.dtype) / self.num_experts
                 output = torch.einsum("...e,...ed->...d", expert_weights, bax)
 
-            else:
+            else: # linear routing
                 if self.num_experts > 1:
                     # Compute expert_weights using the routing layer
                     logits = lora_router(x)
@@ -432,6 +433,7 @@ class Linear(nn.Linear, MoloraLayer):
                         logits = self.top_p_routing(logits, self.top_p)
 
                     expert_weights = F.softmax(logits, dim=-1)
+                    # expert_weights = router_dropout(expert_weights)
                 else:
                     # initialize expert_weights to 1 as we only have one expert
                     expert_weights = torch.ones(x.size(0), x.size(1), 1, device=x.device, dtype=x.dtype)
