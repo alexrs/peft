@@ -252,6 +252,8 @@ if is_bnb_4bit_available():
                 # assume we do not use value
                 # output = lora_router(x, bax)
                 expert_weights = lora_router(x, bax)
+                print(expert_weights.shape)
+                print(bax.shape)
                 output = torch.einsum("...e,...ed->...d", expert_weights, bax)
                 # output = torch.einsum('bsn,bsne->bse', attention, bax)  # [batch_si
 
