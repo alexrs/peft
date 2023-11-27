@@ -36,6 +36,10 @@ class SelfAttentionRouter(nn.Module):
         self.scale = 1.0 / (self.hidden_dim ** 0.5)
         self.use_value = use_value
 
+    def l2_normalize(self, x, axis: int = -1, eps: float = 1e-6):
+        m = torch.rsqrt(torch.square(x).sum(dim=axis, keepdim=True) + eps)
+        return x * m
+
     def forward(self, x, bax):
         # x: [batch_size, seq_len, input_dim]
         # bax: [batch_size, seq_len, num_experts, output_dim]
@@ -43,9 +47,14 @@ class SelfAttentionRouter(nn.Module):
         keys = self.key(bax)  # [batch_size, seq_len, num_experts, hidden_dim]
         if self.use_value:
             values = self.value(bax)  # [batch_size, seq_len, num_experts, output_dim]
+            values = self.l2_normalize(values, axis=-1)
 
         # Transpose for attention computation
         keys_transposed = keys.transpose(-2, -1)  # [batch_size, seq_len, hidden_dim, num_experts]
+
+        # Normalize queries and keys for stability
+        keys_transposed = self.l2_normalize(keys_transposed, axis=-1)
+        queries = self.l2_normalize(queries, axis=-1)
 
         # Compute scaled dot product attention
         scores = torch.einsum('bsh,bshn->bsn', queries, keys_transposed) * self.scale
